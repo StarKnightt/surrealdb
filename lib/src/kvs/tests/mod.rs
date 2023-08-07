@@ -13,9 +13,15 @@ mod mem {
 		new_ds().await.transaction(write, lock).await.unwrap()
 	}
 
+	include!("helper.rs");
+	include!("cluster_init.rs");
+	include!("lq.rs");
+	include!("nq.rs");
 	include!("raw.rs");
 	include!("snapshot.rs");
+	include!("tb.rs");
 	include!("multireader.rs");
+	include!("timestamp_to_versionstamp.rs");
 }
 
 #[cfg(feature = "kv-rocksdb")]
@@ -35,11 +41,17 @@ mod rocksdb {
 		new_ds().await.transaction(write, lock).await.unwrap()
 	}
 
+	include!("helper.rs");
+	include!("cluster_init.rs");
+	include!("lq.rs");
+	include!("nq.rs");
 	include!("raw.rs");
 	include!("snapshot.rs");
+	include!("tb.rs");
 	include!("multireader.rs");
 	include!("multiwriter_different_keys.rs");
 	include!("multiwriter_same_keys_conflict.rs");
+	include!("timestamp_to_versionstamp.rs");
 }
 
 #[cfg(feature = "kv-speedb")]
@@ -59,11 +71,17 @@ mod speedb {
 		new_ds().await.transaction(write, lock).await.unwrap()
 	}
 
+	include!("helper.rs");
+	include!("cluster_init.rs");
+	include!("lq.rs");
+	include!("nq.rs");
 	include!("raw.rs");
 	include!("snapshot.rs");
+	include!("tb.rs");
 	include!("multireader.rs");
 	include!("multiwriter_different_keys.rs");
 	include!("multiwriter_same_keys_conflict.rs");
+	include!("timestamp_to_versionstamp.rs");
 }
 
 #[cfg(feature = "kv-tikv")]
@@ -87,11 +105,17 @@ mod tikv {
 		new_ds().await.transaction(write, lock).await.unwrap()
 	}
 
+	include!("cluster_init.rs");
+	include!("helper.rs");
+	include!("lq.rs");
+	include!("nq.rs");
 	include!("raw.rs");
 	include!("snapshot.rs");
+	include!("tb.rs");
 	include!("multireader.rs");
 	include!("multiwriter_different_keys.rs");
 	include!("multiwriter_same_keys_conflict.rs");
+	include!("timestamp_to_versionstamp.rs");
 }
 
 #[cfg(feature = "kv-fdb")]
@@ -115,9 +139,15 @@ mod fdb {
 		new_ds().await.transaction(write, lock).await.unwrap()
 	}
 
+	include!("cluster_init.rs");
+	include!("helper.rs");
+	include!("lq.rs");
+	include!("nq.rs");
 	include!("raw.rs");
 	include!("snapshot.rs");
+	include!("tb.rs");
 	include!("multireader.rs");
 	include!("multiwriter_different_keys.rs");
 	include!("multiwriter_same_keys_allow.rs");
+	include!("timestamp_to_versionstamp.rs");
 }

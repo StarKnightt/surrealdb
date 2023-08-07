@@ -1,4 +1,58 @@
-use crate::err::Error;
+use std::time::Duration;
+
+use axum_server::Handle;
+use tokio::task::JoinHandle;
+
+use crate::{
+	err::Error,
+	net::rpc::{WebSocketRef, WEBSOCKETS},
+};
+
+/// Start a graceful shutdown:
+/// * Signal the Axum Handle when a shutdown signal is received.
+/// * Stop all WebSocket connections.
+///
+/// A second signal will force an immediate shutdown.
+pub fn graceful_shutdown(http_handle: Handle) -> JoinHandle<()> {
+	tokio::spawn(async move {
+		let result = listen().await.expect("Failed to listen to shutdown signal");
+		info!(target: super::LOG, "{} received. Waiting for graceful shutdown... A second signal will force an immediate shutdown", result);
+
+		tokio::select! {
+			// Start a normal graceful shutdown
+			_ = async {
+				// First stop accepting new HTTP requests
+				http_handle.graceful_shutdown(None);
+
+				// Close all WebSocket connections. Queued messages will still be processed.
+				for (_, WebSocketRef(_, cancel_token)) in WEBSOCKETS.read().await.iter() {
+					cancel_token.cancel();
+				};
+
+				// Wait for all existing WebSocket connections to gracefully close
+				while WEBSOCKETS.read().await.len() > 0 {
+					tokio::time::sleep(Duration::from_millis(100)).await;
+				};
+			} => (),
+			// Force an immediate shutdown if a second signal is received
+			_ = async {
+				if let Ok(signal) = listen().await {
+					warn!(target: super::LOG, "{} received during graceful shutdown. Terminate immediately...", signal);
+				} else {
+					error!(target: super::LOG, "Failed to listen to shutdown signal. Terminate immediately...");
+				}
+
+				// Force an immediate shutdown
+				http_handle.shutdown();
+
+				// Close all WebSocket connections immediately
+				if let Ok(mut writer) = WEBSOCKETS.try_write() {
+					writer.drain();
+				}
+			} => (),
+		}
+	})
+}
 
 #[cfg(unix)]
 pub async fn listen() -> Result<String, Error> {
@@ -11,7 +65,7 @@ pub async fn listen() -> Result<String, Error> {
 	let mut sigterm = signal(SignalKind::terminate())?;
 	// Listen and wait for the system signals
 	tokio::select! {
-		// Wait for a SIGQUIT signal
+		// Wait for a SIGHUP signal
 		_ = sighup.recv() => {
 			Ok(String::from("SIGHUP"))
 		}

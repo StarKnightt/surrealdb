@@ -8,6 +8,7 @@ mod decimal;
 mod dir;
 mod duration;
 mod edges;
+mod explain;
 mod expression;
 mod fetch;
 mod field;
@@ -38,6 +39,7 @@ mod timeout;
 mod uuid;
 mod value;
 mod version;
+mod with;
 
 use serde::ser::Error;
 use serde::ser::Serialize;

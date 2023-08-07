@@ -1,12 +1,16 @@
 use crate::ctx::Context;
 use crate::dbs::Options;
+use crate::dbs::Transaction;
 use crate::doc::CursorDoc;
 use crate::err::Error;
+use crate::iam::Action;
+use crate::iam::ResourceKind;
 use crate::sql::comment::shouldbespace;
 use crate::sql::common::take_u64;
 use crate::sql::error::IResult;
 use crate::sql::table::{table, Table};
 use crate::sql::value::Value;
+use crate::sql::Base;
 use derive::Store;
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
@@ -31,12 +35,35 @@ impl ShowStatement {
 	pub(crate) async fn compute(
 		&self,
 		_ctx: &Context<'_>,
-		_opt: &Options,
+		opt: &Options,
+		txn: &Transaction,
 		_doc: Option<&CursorDoc<'_>>,
 	) -> Result<Value, Error> {
-		Err(Error::FeatureNotYetImplemented {
-			feature: "change feed",
-		})
+		// Selected DB?
+		opt.is_allowed(Action::View, ResourceKind::Table, &Base::Db)?;
+		// Clone transaction
+		let txn = txn.clone();
+		// Claim transaction
+		let mut run = txn.lock().await;
+		// Process the show query
+		let tb = self.table.as_deref();
+		let r = crate::cf::read(
+			&mut run,
+			opt.ns(),
+			opt.db(),
+			tb.map(|x| x.as_str()),
+			self.since,
+			self.limit,
+		)
+		.await?;
+		// Return the changes
+		let mut a = Vec::<Value>::new();
+		for r in r.iter() {
+			let v: Value = r.clone().into_value();
+			a.push(v);
+		}
+		let v: Value = Value::Array(crate::sql::array::Array(a));
+		Ok(v)
 	}
 }
 

@@ -19,6 +19,7 @@ pub(crate) mod edges;
 pub(crate) mod ending;
 pub(crate) mod error;
 pub(crate) mod escape;
+pub(crate) mod explain;
 pub(crate) mod expression;
 pub(crate) mod fetch;
 pub(crate) mod field;
@@ -67,6 +68,7 @@ pub(crate) mod uuid;
 pub(crate) mod value;
 pub(crate) mod version;
 pub(crate) mod view;
+pub(crate) mod with;
 
 #[cfg(test)]
 pub(crate) mod test;
@@ -89,6 +91,7 @@ pub use self::dir::Dir;
 pub use self::duration::Duration;
 pub use self::edges::Edges;
 pub use self::error::Error;
+pub use self::explain::Explain;
 pub use self::expression::Expression;
 pub use self::fetch::Fetch;
 pub use self::fetch::Fetchs;

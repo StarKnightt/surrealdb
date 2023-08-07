@@ -1,6 +1,8 @@
+use crate::iam::Error as IamError;
 use crate::idx::ft::MatchRef;
 use crate::sql::idiom::Idiom;
 use crate::sql::value::Value;
+use crate::vs::Error as VersionstampError;
 use base64_lib::DecodeError as Base64Error;
 use bincode::Error as BincodeError;
 use bung::encode::Error as SerdeError;
@@ -8,6 +10,7 @@ use fst::Error as FstError;
 use jsonwebtoken::errors::Error as JWTError;
 use serde::Serialize;
 use std::borrow::Cow;
+use std::io::Error as IoError;
 use std::string::FromUtf8Error;
 use storekey::decode::Error as DecodeError;
 use storekey::encode::Error as EncodeError;
@@ -25,6 +28,10 @@ pub enum Error {
 	/// The database encountered unreachable logic
 	#[error("The database encountered unreachable logic")]
 	Unreachable,
+
+	/// Statement has been deprecated
+	#[error("{0}")]
+	Deprecated(String),
 
 	/// There was a problem with the underlying datastore
 	#[error("There was a problem with the underlying datastore: {0}")]
@@ -184,10 +191,6 @@ pub enum Error {
 		message: String,
 	},
 
-	/// The permissions do not allow for performing the specified query
-	#[error("You don't have permission to perform this query type")]
-	QueryPermissions,
-
 	/// The permissions do not allow for changing to the specified namespace
 	#[error("You don't have permission to change to the {ns} namespace")]
 	NsNotAllowed {
@@ -256,7 +259,7 @@ pub enum Error {
 
 	// The cluster node does not exist
 	#[error("The node '{value}' does not exist")]
-	ClNotFound {
+	NdNotFound {
 		value: String,
 	},
 
@@ -278,6 +281,18 @@ pub enum Error {
 		value: String,
 	},
 
+	/// The requested live query does not exist
+	#[error("The live query '{value}' does not exist")]
+	LvNotFound {
+		value: String,
+	},
+
+	/// The requested cluster live query does not exist
+	#[error("The cluster live query '{value}' does not exist")]
+	LqNotFound {
+		value: String,
+	},
+
 	/// The requested analyzer does not exist
 	#[error("The analyzer '{value}' does not exist")]
 	AzNotFound {
@@ -288,6 +303,27 @@ pub enum Error {
 	#[error("The index '{value}' does not exist")]
 	IxNotFound {
 		value: String,
+	},
+
+	/// The requested root user does not exist
+	#[error("The root user '{value}' does not exist")]
+	UserRootNotFound {
+		value: String,
+	},
+
+	/// The requested namespace user does not exist
+	#[error("The user '{value}' does not exist in the namespace '{ns}'")]
+	UserNsNotFound {
+		value: String,
+		ns: String,
+	},
+
+	/// The requested database user does not exist
+	#[error("The user '{value}' does not exist in the database '{db}'")]
+	UserDbNotFound {
+		value: String,
+		ns: String,
+		db: String,
 	},
 
 	/// Unable to perform the realtime query
@@ -440,16 +476,20 @@ pub enum Error {
 	TryFrom(String, &'static str),
 
 	/// There was an error processing a remote HTTP request
-	#[error("There was an error processing a remote HTTP request")]
+	#[error("There was an error processing a remote HTTP request: {0}")]
 	Http(String),
 
 	/// There was an error processing a value in parallel
-	#[error("There was an error processing a value in parallel")]
+	#[error("There was an error processing a value in parallel: {0}")]
 	Channel(String),
 
 	/// Represents an underlying error with Serde encoding / decoding
 	#[error("Serde error: {0}")]
 	Serde(#[from] SerdeError),
+
+	/// Represents an underlying error with IO encoding / decoding
+	#[error("I/O error: {0}")]
+	Io(#[from] IoError),
 
 	/// Represents an error when encoding a key-value entry
 	#[error("Key encoding error: {0}")]
@@ -495,15 +535,36 @@ pub enum Error {
 		feature: &'static str,
 	},
 
-	#[doc(hidden)]
-	#[error("Bypass the query planner")]
-	BypassQueryPlanner,
-
 	/// Duplicated match references are not allowed
 	#[error("Duplicated Match reference: {mr}")]
 	DuplicatedMatchRef {
 		mr: MatchRef,
 	},
+
+	/// Represents a failure in timestamp arithmetic related to database internals
+	#[error("Timestamp arithmetic error: {0}")]
+	TimestampOverflow(String),
+
+	/// Internal server error
+	/// This should be used extremely sporadically, since we lose the type of error as a consequence
+	/// There will be times when it is useful, such as with unusual type conversion errors
+	#[error("Internal database error: {0}")]
+	Internal(String),
+
+	/// Unimplemented functionality
+	#[error("Unimplemented functionality: {0}")]
+	Unimplemented(String),
+
+	#[error("Versionstamp in key is corrupted: {0}")]
+	CorruptedVersionstampInKey(#[from] VersionstampError),
+
+	/// Invalid level
+	#[error("Invalid level '{0}'")]
+	InvalidLevel(String),
+
+	/// Represents an underlying IAM error
+	#[error("IAM error: {0}")]
+	IamError(#[from] IamError),
 }
 
 impl From<Error> for String {
@@ -549,14 +610,8 @@ impl From<tikv::Error> for Error {
 	fn from(e: tikv::Error) -> Error {
 		match e {
 			tikv::Error::DuplicateKeyInsertion => Error::TxKeyAlreadyExists,
-			tikv::Error::KeyError(tikv_client_proto::kvrpcpb::KeyError {
-				abort,
-				..
-			}) if abort.contains("KeyTooLarge") => Error::TxKeyTooLarge,
-			tikv::Error::RegionError(tikv_client_proto::errorpb::Error {
-				raft_entry_too_large,
-				..
-			}) if raft_entry_too_large.is_some() => Error::TxTooLarge,
+			tikv::Error::KeyError(ke) if ke.abort.contains("KeyTooLarge") => Error::TxKeyTooLarge,
+			tikv::Error::RegionError(re) if re.raft_entry_too_large.is_some() => Error::TxTooLarge,
 			_ => Error::Tx(e.to_string()),
 		}
 	}

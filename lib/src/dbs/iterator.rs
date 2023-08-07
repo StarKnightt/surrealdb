@@ -1,12 +1,16 @@
 use crate::ctx::Canceller;
 use crate::ctx::Context;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::dbs::distinct::AsyncDistinct;
+use crate::dbs::distinct::SyncDistinct;
+use crate::dbs::explanation::Explanation;
 use crate::dbs::Statement;
 use crate::dbs::{Options, Transaction};
-use crate::doc::CursorDoc;
 use crate::doc::Document;
 use crate::err::Error;
 use crate::idx::ft::docids::DocId;
-use crate::idx::planner::plan::Plan;
+use crate::idx::planner::executor::IteratorRef;
+use crate::idx::planner::plan::IndexOption;
 use crate::sql::array::Array;
 use crate::sql::edges::Edges;
 use crate::sql::field::Field;
@@ -14,11 +18,10 @@ use crate::sql::range::Range;
 use crate::sql::table::Table;
 use crate::sql::thing::Thing;
 use crate::sql::value::Value;
-use crate::sql::Object;
 use async_recursion::async_recursion;
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::mem;
 
 pub(crate) enum Iterable {
@@ -29,7 +32,14 @@ pub(crate) enum Iterable {
 	Edges(Edges),
 	Mergeable(Thing, Value),
 	Relatable(Thing, Thing, Thing),
-	Index(Table, Plan),
+	Index(Table, IteratorRef, IndexOption),
+}
+
+pub(crate) struct Processed {
+	pub(crate) ir: Option<IteratorRef>,
+	pub(crate) rid: Option<Thing>,
+	pub(crate) doc_id: Option<DocId>,
+	pub(crate) val: Operable,
 }
 
 pub(crate) enum Operable {
@@ -55,6 +65,7 @@ pub(crate) struct Iterator {
 	// Iterator runtime error
 	error: Option<Error>,
 	// Iterator output results
+	// TODO: Should be stored on disk / (mmap?)
 	results: Vec<Value>,
 	// Iterator input values
 	entries: Vec<Iterable>,
@@ -88,30 +99,42 @@ impl Iterator {
 		self.setup_limit(&cancel_ctx, opt, txn, stm).await?;
 		// Process the query START clause
 		self.setup_start(&cancel_ctx, opt, txn, stm).await?;
-		// Process any EXPLAIN clause
-		let explanation = self.output_explain(&cancel_ctx, opt, txn, stm)?;
-		// Process prepared values
-		self.iterate(&cancel_ctx, opt, txn, stm).await?;
-		// Return any document errors
-		if let Some(e) = self.error.take() {
-			return Err(e);
+
+		// Extract the expected behaviour depending on the presence of EXPLAIN with or without FULL
+		let (do_iterate, mut explanation) = Explanation::new(stm.explain(), &self.entries);
+
+		if do_iterate {
+			// Process prepared values
+			self.iterate(&cancel_ctx, opt, txn, stm).await?;
+			// Return any document errors
+			if let Some(e) = self.error.take() {
+				return Err(e);
+			}
+			// Process any SPLIT clause
+			self.output_split(ctx, opt, txn, stm).await?;
+			// Process any GROUP clause
+			self.output_group(ctx, opt, txn, stm).await?;
+			// Process any ORDER clause
+			self.output_order(ctx, opt, txn, stm).await?;
+			// Process any START clause
+			self.output_start(ctx, opt, txn, stm).await?;
+			// Process any LIMIT clause
+			self.output_limit(ctx, opt, txn, stm).await?;
+
+			if let Some(e) = &mut explanation {
+				e.add_fetch(self.results.len());
+				self.results.clear();
+			} else {
+				// Process any FETCH clause
+				self.output_fetch(ctx, opt, txn, stm).await?;
+			}
 		}
-		// Process any SPLIT clause
-		self.output_split(ctx, opt, txn, stm).await?;
-		// Process any GROUP clause
-		self.output_group(ctx, opt, txn, stm).await?;
-		// Process any ORDER clause
-		self.output_order(ctx, opt, txn, stm).await?;
-		// Process any START clause
-		self.output_start(ctx, opt, txn, stm).await?;
-		// Process any LIMIT clause
-		self.output_limit(ctx, opt, txn, stm).await?;
-		// Process any FETCH clause
-		self.output_fetch(ctx, opt, txn, stm).await?;
-		// Add the EXPLAIN clause to the result
+
+		// Output the explanation if any
 		if let Some(e) = explanation {
-			self.results.push(e);
+			e.output(&mut self.results);
 		}
+
 		// Output the results
 		Ok(mem::take(&mut self.results).into())
 	}
@@ -249,10 +272,10 @@ impl Iterator {
 								_ => {
 									let x = vals.first();
 									let x = if let Some(alias) = alias {
-										let cur = CursorDoc::new(None, None, &x);
+										let cur = (&x).into();
 										alias.compute(ctx, opt, txn, Some(&cur)).await?
 									} else {
-										let cur = CursorDoc::new(None, None, &x);
+										let cur = (&x).into();
 										expr.compute(ctx, opt, txn, Some(&cur)).await?
 									};
 									obj.set(ctx, opt, txn, idiom.as_ref(), x).await?;
@@ -355,63 +378,6 @@ impl Iterator {
 		Ok(())
 	}
 
-	#[inline]
-	fn output_explain(
-		&mut self,
-		_ctx: &Context<'_>,
-		_opt: &Options,
-		_txn: &Transaction,
-		stm: &Statement<'_>,
-	) -> Result<Option<Value>, Error> {
-		Ok(if stm.explain() {
-			let mut explains = Vec::with_capacity(self.entries.len());
-			for iter in &self.entries {
-				let (operation, detail) = match iter {
-					Iterable::Value(v) => ("Iterate Value", vec![("value", v.to_owned())]),
-					Iterable::Table(t) => {
-						("Iterate Table", vec![("table", Value::from(t.0.to_owned()))])
-					}
-					Iterable::Thing(t) => {
-						("Iterate Thing", vec![("thing", Value::Thing(t.to_owned()))])
-					}
-					Iterable::Range(r) => {
-						("Iterate Range", vec![("table", Value::from(r.tb.to_owned()))])
-					}
-					Iterable::Edges(e) => {
-						("Iterate Edges", vec![("from", Value::Thing(e.from.to_owned()))])
-					}
-					Iterable::Mergeable(t, v) => (
-						"Iterate Mergeable",
-						vec![("thing", Value::Thing(t.to_owned())), ("value", v.to_owned())],
-					),
-					Iterable::Relatable(t1, t2, t3) => (
-						"Iterate Relatable",
-						vec![
-							("thing-1", Value::Thing(t1.to_owned())),
-							("thing-2", Value::Thing(t2.to_owned())),
-							("thing-3", Value::Thing(t3.to_owned())),
-						],
-					),
-					Iterable::Index(t, p) => (
-						"Iterate Index",
-						vec![("table", Value::from(t.0.to_owned())), ("plan", p.explain())],
-					),
-				};
-				let explain = Object::from(HashMap::from([
-					("operation", Value::from(operation)),
-					("detail", Value::Object(Object::from(HashMap::from_iter(detail)))),
-				]));
-				explains.push(Value::Object(explain));
-			}
-			Some(Value::Object(Object::from(HashMap::from([(
-				"explain",
-				Value::Array(Array::from(explains)),
-			)]))))
-		} else {
-			None
-		})
-	}
-
 	#[cfg(target_arch = "wasm32")]
 	#[async_recursion(?Send)]
 	async fn iterate(
@@ -423,9 +389,13 @@ impl Iterator {
 	) -> Result<(), Error> {
 		// Prevent deep recursion
 		let opt = &opt.dive(4)?;
+		// If any iterator requires distinct, we new to create a global distinct instance
+		let mut distinct = SyncDistinct::new(ctx);
 		// Process all prepared values
 		for v in mem::take(&mut self.entries) {
-			v.iterate(ctx, opt, txn, stm, self).await?;
+			// Distinct is passed only for iterators that really requires it
+			let dis = SyncDistinct::requires_distinct(ctx, distinct.as_mut(), &v);
+			v.iterate(ctx, opt, txn, stm, self, dis).await?;
 		}
 		// Everything processed ok
 		Ok(())
@@ -446,15 +416,21 @@ impl Iterator {
 		match stm.parallel() {
 			// Run statements sequentially
 			false => {
+				// If any iterator requires distinct, we new to create a global distinct instance
+				let mut distinct = SyncDistinct::new(ctx);
 				// Process all prepared values
 				for v in mem::take(&mut self.entries) {
-					v.iterate(ctx, opt, txn, stm, self).await?;
+					// Distinct is passed only for iterators that really requires it
+					let dis = SyncDistinct::requires_distinct(ctx, distinct.as_mut(), &v);
+					v.iterate(ctx, opt, txn, stm, self, dis).await?;
 				}
 				// Everything processed ok
 				Ok(())
 			}
 			// Run statements in parallel
 			true => {
+				// If any iterator requires distinct, we new to create a global distinct instance
+				let distinct = AsyncDistinct::new(ctx);
 				// Create a new executor
 				let e = executor::Executor::new();
 				// Take all of the iterator values
@@ -467,7 +443,9 @@ impl Iterator {
 				let adocs = async {
 					// Process all prepared values
 					for v in vals {
-						e.spawn(v.channel(ctx, opt, txn, stm, chn.clone()))
+						// Distinct is passed only for iterators that really requires it
+						let dis = AsyncDistinct::requires_distinct(ctx, distinct.as_ref(), &v);
+						e.spawn(v.channel(ctx, opt, txn, stm, chn.clone(), dis))
 							// Ensure we detach the spawned task
 							.detach();
 					}
@@ -479,8 +457,8 @@ impl Iterator {
 				// Create an async closure for received values
 				let avals = async {
 					// Process all received values
-					while let Ok((k, d, v)) = docs.recv().await {
-						e.spawn(Document::compute(ctx, opt, txn, stm, chn.clone(), k, d, v))
+					while let Ok(pro) = docs.recv().await {
+						e.spawn(Document::compute(ctx, opt, txn, stm, chn.clone(), pro))
 							// Ensure we detach the spawned task
 							.detach();
 					}
@@ -509,29 +487,26 @@ impl Iterator {
 	}
 
 	/// Process a new record Thing and Value
-	#[allow(clippy::too_many_arguments)]
 	pub async fn process(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		stm: &Statement<'_>,
-		thg: Option<Thing>,
-		doc_id: Option<DocId>,
-		val: Operable,
+		pro: Processed,
 	) {
 		// Check current context
 		if ctx.is_done() {
 			return;
 		}
 		// Setup a new workable
-		let (val, ext) = match val {
+		let (val, ext) = match pro.val {
 			Operable::Value(v) => (v, Workable::Normal),
 			Operable::Mergeable(v, o) => (v, Workable::Insert(o)),
 			Operable::Relatable(f, v, w) => (v, Workable::Relate(f, w)),
 		};
 		// Setup a new document
-		let mut doc = Document::new(thg.as_ref(), doc_id, &val, ext);
+		let mut doc = Document::new(pro.ir, pro.rid.as_ref(), pro.doc_id, &val, ext);
 		// Process the document
 		let res = match stm {
 			Statement::Select(_) => doc.select(ctx, opt, txn, stm).await,

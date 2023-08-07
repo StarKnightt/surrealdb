@@ -39,7 +39,7 @@ impl<'a> Document<'a> {
 					if opt.id()? == lv.node.0 {
 						let thing = (*rid).clone();
 						chn.send(Notification {
-							id: lv.id.0,
+							id: lv.id.clone(),
 							action: Action::Delete,
 							result: Value::Thing(thing),
 						})
@@ -51,7 +51,7 @@ impl<'a> Document<'a> {
 					// Send a CREATE notification
 					if opt.id()? == lv.node.0 {
 						chn.send(Notification {
-							id: lv.id.0,
+							id: lv.id.clone(),
 							action: Action::Create,
 							result: self.pluck(ctx, opt, txn, &lq).await?,
 						})
@@ -63,7 +63,7 @@ impl<'a> Document<'a> {
 					// Send a UPDATE notification
 					if opt.id()? == lv.node.0 {
 						chn.send(Notification {
-							id: lv.id.0,
+							id: lv.id.clone(),
 							action: Action::Update,
 							result: self.pluck(ctx, opt, txn, &lq).await?,
 						})

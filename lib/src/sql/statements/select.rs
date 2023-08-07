@@ -1,6 +1,5 @@
 use crate::ctx::Context;
 use crate::dbs::Iterator;
-use crate::dbs::Level;
 use crate::dbs::Options;
 use crate::dbs::Statement;
 use crate::dbs::{Iterable, Transaction};
@@ -10,6 +9,7 @@ use crate::idx::planner::QueryPlanner;
 use crate::sql::comment::shouldbespace;
 use crate::sql::cond::{cond, Cond};
 use crate::sql::error::IResult;
+use crate::sql::explain::{explain, Explain};
 use crate::sql::fetch::{fetch, Fetchs};
 use crate::sql::field::{fields, Field, Fields};
 use crate::sql::group::{group, Groups};
@@ -23,6 +23,7 @@ use crate::sql::start::{start, Start};
 use crate::sql::timeout::{timeout, Timeout};
 use crate::sql::value::{selects, Value, Values};
 use crate::sql::version::{version, Version};
+use crate::sql::with::{with, With};
 use derive::Store;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::opt;
@@ -34,6 +35,7 @@ use std::fmt;
 pub struct SelectStatement {
 	pub expr: Fields,
 	pub what: Values,
+	pub with: Option<With>,
 	pub cond: Option<Cond>,
 	pub split: Option<Splits>,
 	pub group: Option<Groups>,
@@ -44,7 +46,7 @@ pub struct SelectStatement {
 	pub version: Option<Version>,
 	pub timeout: Option<Timeout>,
 	pub parallel: bool,
-	pub explain: bool,
+	pub explain: Option<Explain>,
 }
 
 impl SelectStatement {
@@ -80,23 +82,21 @@ impl SelectStatement {
 		txn: &Transaction,
 		doc: Option<&CursorDoc<'_>>,
 	) -> Result<Value, Error> {
-		// Selected DB?
-		opt.needs(Level::Db)?;
-		// Allowed to run?
-		opt.check(Level::No)?;
+		// Valid options?
+		opt.valid_for_db()?;
 		// Create a new iterator
 		let mut i = Iterator::new();
 		// Ensure futures are stored
 		let opt = &opt.new_with_futures(false);
 
 		// Get a query planner
-		let mut planner = QueryPlanner::new(opt, &self.cond);
+		let mut planner = QueryPlanner::new(opt, &self.with, &self.cond);
 		// Loop over the select targets
 		for w in self.what.0.iter() {
 			let v = w.compute(ctx, opt, txn, doc).await?;
 			match v {
 				Value::Table(t) => {
-					i.ingest(planner.get_iterable(ctx, txn, t).await?);
+					planner.add_iterables(ctx, txn, t, &mut i).await?;
 				}
 				Value::Thing(v) => i.ingest(Iterable::Thing(v)),
 				Value::Range(v) => i.ingest(Iterable::Range(*v)),
@@ -127,9 +127,9 @@ impl SelectStatement {
 		// Assign the statement
 		let stm = Statement::from(self);
 		// Add query executors if any
-		if let Some(ex) = planner.finish() {
+		if planner.has_executors() {
 			let mut ctx = Context::new(ctx);
-			ctx.set_query_executors(ex);
+			ctx.set_query_planner(&planner);
 			// Output the results
 			i.output(&ctx, opt, txn, &stm).await
 		} else {
@@ -142,6 +142,9 @@ impl SelectStatement {
 impl fmt::Display for SelectStatement {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		write!(f, "SELECT {} FROM {}", self.expr, self.what)?;
+		if let Some(ref v) = self.with {
+			write!(f, " {v}")?
+		}
 		if let Some(ref v) = self.cond {
 			write!(f, " {v}")?
 		}
@@ -172,6 +175,9 @@ impl fmt::Display for SelectStatement {
 		if self.parallel {
 			f.write_str(" PARALLEL")?
 		}
+		if let Some(ref v) = self.explain {
+			write!(f, " {v}")?
+		}
 		Ok(())
 	}
 }
@@ -184,6 +190,7 @@ pub fn select(i: &str) -> IResult<&str, SelectStatement> {
 	let (i, _) = tag_no_case("FROM")(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, what) = selects(i)?;
+	let (i, with) = opt(preceded(shouldbespace, with))(i)?;
 	let (i, cond) = opt(preceded(shouldbespace, cond))(i)?;
 	let (i, split) = opt(preceded(shouldbespace, split))(i)?;
 	check_split_on_fields(i, &expr, &split)?;
@@ -197,12 +204,13 @@ pub fn select(i: &str) -> IResult<&str, SelectStatement> {
 	let (i, version) = opt(preceded(shouldbespace, version))(i)?;
 	let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
 	let (i, parallel) = opt(preceded(shouldbespace, tag_no_case("PARALLEL")))(i)?;
-	let (i, explain) = opt(preceded(shouldbespace, tag_no_case("EXPLAIN")))(i)?;
+	let (i, explain) = opt(preceded(shouldbespace, explain))(i)?;
 	Ok((
 		i,
 		SelectStatement {
 			expr,
 			what,
+			with,
 			cond,
 			split,
 			group,
@@ -213,7 +221,7 @@ pub fn select(i: &str) -> IResult<&str, SelectStatement> {
 			version,
 			timeout,
 			parallel: parallel.is_some(),
-			explain: explain.is_some(),
+			explain,
 		},
 	))
 }

@@ -1,15 +1,18 @@
 use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::{Level, Transaction};
+use crate::dbs::Transaction;
 use crate::doc::CursorDoc;
 use crate::err::Error;
+use crate::iam::{Action, ResourceKind};
 use crate::idx::ft::FtIndex;
+use crate::idx::trees::store::TreeStoreType;
 use crate::idx::IndexKeyBase;
 use crate::sql::comment::shouldbespace;
 use crate::sql::error::IResult;
 use crate::sql::ident::{ident, Ident};
 use crate::sql::index::Index;
 use crate::sql::value::Value;
+use crate::sql::Base;
 use derive::Store;
 use nom::bytes::complete::tag_no_case;
 use serde::{Deserialize, Serialize};
@@ -32,10 +35,8 @@ impl AnalyzeStatement {
 	) -> Result<Value, Error> {
 		match self {
 			AnalyzeStatement::Idx(tb, idx) => {
-				// Selected DB?
-				opt.needs(Level::Db)?;
 				// Allowed to run?
-				opt.check(Level::Db)?;
+				opt.is_allowed(Action::View, ResourceKind::Index, &Base::Db)?;
 				// Claim transaction
 				let mut run = txn.lock().await;
 				// Read the index
@@ -51,7 +52,16 @@ impl AnalyzeStatement {
 						hl,
 					} => {
 						let az = run.get_az(opt.ns(), opt.db(), az.as_str()).await?;
-						let ft = FtIndex::new(&mut run, az, ikb, *order, sc, *hl).await?;
+						let ft = FtIndex::new(
+							&mut run,
+							az,
+							ikb,
+							*order,
+							sc,
+							*hl,
+							TreeStoreType::Traversal,
+						)
+						.await?;
 						ft.statistics(&mut run).await?
 					}
 					_ => {

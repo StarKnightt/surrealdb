@@ -2,6 +2,7 @@ mod parse;
 use parse::Parse;
 use surrealdb::dbs::Session;
 use surrealdb::err::Error;
+use surrealdb::iam::Role;
 use surrealdb::kvs::Datastore;
 use surrealdb::sql::Value;
 
@@ -14,7 +15,7 @@ async fn select_field_value() -> Result<(), Error> {
 		SELECT name FROM person;
 	";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
+	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 4);
 	//
@@ -72,11 +73,12 @@ async fn select_expression_value() -> Result<(), Error> {
 		CREATE thing:b SET number = -5, boolean = false;
 		SELECT VALUE -number FROM thing;
 		SELECT VALUE !boolean FROM thing;
+		SELECT VALUE !boolean FROM thing EXPLAIN FULL;
 	";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
-	let res = &mut dbs.execute(&sql, &ses, None).await?;
-	assert_eq!(res.len(), 4);
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
+	assert_eq!(res.len(), 5);
 	//
 	let tmp = res.remove(0).result?;
 	let val = Value::parse(
@@ -120,6 +122,144 @@ async fn select_expression_value() -> Result<(), Error> {
 	);
 	assert_eq!(tmp, val);
 	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+				{
+					detail: {
+						table: 'thing',
+					},
+					operation: 'Iterate Table'
+				},
+				{
+					detail: {
+						count: 2,
+					},
+					operation: 'Fetch'
+				}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	Ok(())
+}
+
+#[tokio::test]
+async fn select_dynamic_array_keys_and_object_keys() -> Result<(), Error> {
+	let sql = "
+		LET $lang = 'en';
+		UPDATE documentation:test CONTENT {
+			primarylang: 'en',
+			languages: {
+				'en': 'this is english',
+				'es': 'esto es español',
+				'de': 'das ist Englisch',
+			},
+			tags: [
+				{ type: 'library', value: 'client-side' },
+				{ type: 'library', value: 'server-side' },
+				{ type: 'environment', value: 'frontend' },
+			]
+		};
+		-- An array filter, followed by an array index operation
+		SELECT tags[WHERE type = 'library'][0].value FROM documentation:test;
+		-- Selecting an object value or array index using a string as a key
+		SELECT languages['en'] AS content FROM documentation:test;
+		-- Updating an object value or array index using a string as a key
+		UPDATE documentation:test SET languages['en'] = 'my primary text';
+		-- Selecting an object value or array index using a parameter as a key
+		SELECT languages[$lang] AS content FROM documentation:test;
+		-- Updating an object value or array index using a parameter as a key
+		UPDATE documentation:test SET languages[$lang] = 'my secondary text';
+		-- Selecting an object or array index value using the value of another document field as a key
+		SELECT languages[primarylang] AS content FROM documentation;
+	";
+	let dbs = Datastore::new("memory").await?;
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
+	assert_eq!(res.len(), 8);
+	//
+	let tmp = res.remove(0).result;
+	assert!(tmp.is_ok());
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+			{
+				id: documentation:test,
+				languages: {
+					de: 'das ist Englisch',
+					en: 'this is english',
+					es: 'esto es español',
+				},
+				primarylang: 'en',
+				tags: [
+					{
+						type: 'library',
+						value: 'client-side',
+					},
+					{
+						type: 'library',
+						value: 'server-side',
+					},
+					{
+						type: 'environment',
+						value: 'frontend',
+					}
+				]
+			}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+			{
+				tags: {
+					value: 'client-side'
+				}
+			}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+			{
+				content: 'this is english'
+			}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result;
+	assert!(tmp.is_ok());
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+			{
+				content: 'my primary text'
+			}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result;
+	assert!(tmp.is_ok());
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+			{
+				content: 'my secondary text'
+			}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
 	Ok(())
 }
 
@@ -134,7 +274,7 @@ async fn select_writeable_subqueries() -> Result<(), Error> {
 		RETURN $id;
 	";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
+	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 6);
 	//
@@ -178,7 +318,7 @@ async fn select_where_field_is_bool() -> Result<(), Error> {
 	";
 
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
+	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 6);
 	//
@@ -258,17 +398,98 @@ async fn select_where_field_is_bool() -> Result<(), Error> {
 
 	Ok(())
 }
+
+#[tokio::test]
+async fn select_where_field_is_thing_and_with_index() -> Result<(), Error> {
+	let sql = "
+		CREATE person:tobie SET name = 'Tobie';
+		DEFINE INDEX author ON TABLE post COLUMNS author;
+		CREATE post:1 SET author = person:tobie;
+		CREATE post:2 SET author = person:tobie;
+		SELECT * FROM post WHERE author = person:tobie EXPLAIN;
+		SELECT * FROM post WHERE author = person:tobie EXPLAIN FULL;
+		SELECT * FROM post WHERE author = person:tobie;";
+	let dbs = Datastore::new("memory").await?;
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
+	assert_eq!(res.len(), 7);
+	//
+	let _ = res.remove(0).result?;
+	let _ = res.remove(0).result?;
+	let _ = res.remove(0).result?;
+	let _ = res.remove(0).result?;
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+				{
+					detail: {
+						plan: {
+							index: 'author',
+							operator: '=',
+							value: person:tobie
+						},
+						table: 'post',
+					},
+					operation: 'Iterate Index'
+				}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+				{
+					detail: {
+						plan: {
+							index: 'author',
+							operator: '=',
+							value: person:tobie
+						},
+						table: 'post',
+					},
+					operation: 'Iterate Index'
+				},
+				{
+					detail: {
+						count: 2,
+					},
+					operation: 'Fetch'
+				}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+			{
+				author: person:tobie,
+				id: post:1
+			},
+			{
+				author: person:tobie,
+				id: post:2
+			}
+		]",
+	);
+	assert_eq!(tmp, val);
+	Ok(())
+}
+
 #[tokio::test]
 async fn select_where_and_with_index() -> Result<(), Error> {
 	let sql = "
 		CREATE person:tobie SET name = 'Tobie', genre='m';
 		CREATE person:jaime SET name = 'Jaime', genre='m';
 		DEFINE INDEX person_name ON TABLE person COLUMNS name;
-		SELECT name FROM person WHERE name = 'Tobie' AND genre = 'm' EXPLAIN;";
+		SELECT name FROM person WHERE name = 'Tobie' AND genre = 'm' EXPLAIN;
+		SELECT name FROM person WHERE name = 'Tobie' AND genre = 'm';";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
+	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
-	assert_eq!(res.len(), 4);
+	assert_eq!(res.len(), 5);
 	//
 	let _ = res.remove(0).result?;
 	let _ = res.remove(0).result?;
@@ -277,24 +498,26 @@ async fn select_where_and_with_index() -> Result<(), Error> {
 	let tmp = res.remove(0).result?;
 	let val = Value::parse(
 		"[
+				{
+					detail: {
+						plan: {
+							index: 'person_name',
+							operator: '=',
+							value: 'Tobie'
+						},
+						table: 'person',
+					},
+					operation: 'Iterate Index'
+				}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
 			{
 				name: 'Tobie'
-			},
-			{
-				explain:
-				[
-					{
-						detail: {
-							plan: {
-								index: 'person_name',
-								operator: '=',
-								value: 'Tobie'
-							},
-							table: 'person',
-						},
-						operation: 'Iterate Index'
-					}
-				]
 			}
 		]",
 	);
@@ -308,11 +531,12 @@ async fn select_where_and_with_unique_index() -> Result<(), Error> {
 		CREATE person:tobie SET name = 'Tobie', genre='m';
 		CREATE person:jaime SET name = 'Jaime', genre='m';
 		DEFINE INDEX person_name ON TABLE person COLUMNS name UNIQUE;
-		SELECT name FROM person WHERE name = 'Jaime' AND genre = 'm' EXPLAIN;";
+		SELECT name FROM person WHERE name = 'Jaime' AND genre = 'm' EXPLAIN;
+		SELECT name FROM person WHERE name = 'Jaime' AND genre = 'm';";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
+	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
-	assert_eq!(res.len(), 4);
+	assert_eq!(res.len(), 5);
 	//
 	let _ = res.remove(0).result?;
 	let _ = res.remove(0).result?;
@@ -321,24 +545,26 @@ async fn select_where_and_with_unique_index() -> Result<(), Error> {
 	let tmp = res.remove(0).result?;
 	let val = Value::parse(
 		"[
+				{
+					detail: {
+						plan: {
+							index: 'person_name',
+							operator: '=',
+							value: 'Jaime'
+						},
+						table: 'person',
+					},
+					operation: 'Iterate Index'
+				}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
 			{
 				name: 'Jaime'
-			},
-			{
-				explain:
-				[
-					{
-						detail: {
-							plan: {
-								index: 'person_name',
-								operator: '=',
-								value: 'Jaime'
-							},
-							table: 'person',
-						},
-						operation: 'Iterate Index'
-					}
-				]
 			}
 		]",
 	);
@@ -353,11 +579,12 @@ async fn select_where_and_with_fulltext_index() -> Result<(), Error> {
 		CREATE person:jaime SET name = 'Jaime', genre='m';
 		DEFINE ANALYZER simple TOKENIZERS blank,class FILTERS lowercase;
 		DEFINE INDEX ft_name ON TABLE person COLUMNS name SEARCH ANALYZER simple BM25(1.2,0.75);
-		SELECT name FROM person WHERE name @@ 'Jaime' AND genre = 'm' EXPLAIN;";
+		SELECT name FROM person WHERE name @@ 'Jaime' AND genre = 'm' EXPLAIN;
+		SELECT name FROM person WHERE name @@ 'Jaime' AND genre = 'm';";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
+	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
-	assert_eq!(res.len(), 5);
+	assert_eq!(res.len(), 6);
 	//
 	let _ = res.remove(0).result?;
 	let _ = res.remove(0).result?;
@@ -367,27 +594,316 @@ async fn select_where_and_with_fulltext_index() -> Result<(), Error> {
 	let tmp = res.remove(0).result?;
 	let val = Value::parse(
 		"[
+				{
+					detail: {
+						plan: {
+							index: 'ft_name',
+							operator: '@@',
+							value: 'Jaime'
+						},
+						table: 'person',
+					},
+					operation: 'Iterate Index'
+				}
+		]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
 			{
 				name: 'Jaime'
-			},
-			{
-				explain:
-				[
-					{
-						detail: {
-							plan: {
-								index: 'ft_name',
-								operator: '@@',
-								value: 'Jaime'
-							},
-							table: 'person',
-						},
-						operation: 'Iterate Index'
-					}
-				]
 			}
 		]",
 	);
 	assert_eq!(tmp, val);
 	Ok(())
+}
+
+#[tokio::test]
+async fn select_where_explain() -> Result<(), Error> {
+	let sql = "
+		CREATE person:tobie SET name = 'Tobie';
+		CREATE person:jaime SET name = 'Jaime';
+		CREATE software:surreal SET name = 'SurrealDB';
+		SELECT * FROM person,software EXPLAIN;
+		SELECT * FROM person,software EXPLAIN FULL;";
+	let dbs = Datastore::new("memory").await?;
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
+	assert_eq!(res.len(), 5);
+	//
+	let _ = res.remove(0).result?;
+	let _ = res.remove(0).result?;
+	let _ = res.remove(0).result?;
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+				{
+					detail: {
+						table: 'person',
+					},
+					operation: 'Iterate Table'
+				},
+				{
+					detail: {
+						table: 'software',
+					},
+					operation: 'Iterate Table'
+				}
+			]",
+	);
+	assert_eq!(tmp, val);
+	//
+	let tmp = res.remove(0).result?;
+	let val = Value::parse(
+		"[
+				{
+					detail: {
+						table: 'person',
+					},
+					operation: 'Iterate Table'
+				},
+				{
+					detail: {
+						table: 'software',
+					},
+					operation: 'Iterate Table'
+				},
+				{
+					detail: {
+						count: 3,
+					},
+					operation: 'Fetch'
+				},
+			]",
+	);
+	assert_eq!(tmp, val);
+	//
+	Ok(())
+}
+
+//
+// Permissions
+//
+
+async fn common_permissions_checks(auth_enabled: bool) {
+	let tests = vec![
+		// Root level
+		((().into(), Role::Owner), ("NS", "DB"), true, "owner at root level should be able to select"),
+		((().into(), Role::Editor), ("NS", "DB"), true, "editor at root level should be able to select"),
+		((().into(), Role::Viewer), ("NS", "DB"), true, "viewer at root level should not be able to select"),
+
+		// Namespace level
+		((("NS",).into(), Role::Owner), ("NS", "DB"), true, "owner at namespace level should be able to select on its namespace"),
+		((("NS",).into(), Role::Owner), ("OTHER_NS", "DB"), false, "owner at namespace level should not be able to select on another namespace"),
+		((("NS",).into(), Role::Editor), ("NS", "DB"), true, "editor at namespace level should be able to select on its namespace"),
+		((("NS",).into(), Role::Editor), ("OTHER_NS", "DB"), false, "editor at namespace level should not be able to select on another namespace"),
+		((("NS",).into(), Role::Viewer), ("NS", "DB"), true, "viewer at namespace level should not be able to select on its namespace"),
+		((("NS",).into(), Role::Viewer), ("OTHER_NS", "DB"), false, "viewer at namespace level should not be able to select on another namespace"),
+
+		// Database level
+		((("NS", "DB").into(), Role::Owner), ("NS", "DB"), true, "owner at database level should be able to select on its database"),
+		((("NS", "DB").into(), Role::Owner), ("NS", "OTHER_DB"), false, "owner at database level should not be able to select on another database"),
+		((("NS", "DB").into(), Role::Owner), ("OTHER_NS", "DB"), false, "owner at database level should not be able to select on another namespace even if the database name matches"),
+		((("NS", "DB").into(), Role::Editor), ("NS", "DB"), true, "editor at database level should be able to select on its database"),
+		((("NS", "DB").into(), Role::Editor), ("NS", "OTHER_DB"), false, "editor at database level should not be able to select on another database"),
+		((("NS", "DB").into(), Role::Editor), ("OTHER_NS", "DB"), false, "editor at database level should not be able to select on another namespace even if the database name matches"),
+		((("NS", "DB").into(), Role::Viewer), ("NS", "DB"), true, "viewer at database level should not be able to select on its database"),
+		((("NS", "DB").into(), Role::Viewer), ("NS", "OTHER_DB"), false, "viewer at database level should not be able to select on another database"),
+		((("NS", "DB").into(), Role::Viewer), ("OTHER_NS", "DB"), false, "viewer at database level should not be able to select on another namespace even if the database name matches"),
+	];
+	let statement = "SELECT * FROM person";
+
+	for ((level, role), (ns, db), should_succeed, msg) in tests.into_iter() {
+		let sess = Session::for_level(level, role).with_ns(ns).with_db(db);
+
+		{
+			let ds = Datastore::new("memory").await.unwrap().with_auth_enabled(auth_enabled);
+
+			// Prepare datastore
+			let mut resp = ds
+				.execute("CREATE person", &Session::owner().with_ns("NS").with_db("DB"), None)
+				.await
+				.unwrap();
+			let res = resp.remove(0).output();
+			assert!(
+				res.is_ok() && res.unwrap() != Value::parse("[]"),
+				"unexpected error creating person record"
+			);
+			let mut resp = ds
+				.execute("CREATE person", &Session::owner().with_ns("OTHER_NS").with_db("DB"), None)
+				.await
+				.unwrap();
+			let res = resp.remove(0).output();
+			assert!(
+				res.is_ok() && res.unwrap() != Value::parse("[]"),
+				"unexpected error creating person record"
+			);
+			let mut resp = ds
+				.execute("CREATE person", &Session::owner().with_ns("NS").with_db("OTHER_DB"), None)
+				.await
+				.unwrap();
+			let res = resp.remove(0).output();
+			assert!(
+				res.is_ok() && res.unwrap() != Value::parse("[]"),
+				"unexpected error creating person record"
+			);
+
+			// Run the test
+			let mut resp = ds.execute(statement, &sess, None).await.unwrap();
+			let res = resp.remove(0).output();
+
+			// Select always succeeds, but the result may be empty
+			assert!(res.is_ok());
+
+			if should_succeed {
+				assert!(res.unwrap() != Value::parse("[]"), "{}", msg);
+			} else {
+				assert!(res.unwrap() == Value::parse("[]"), "{}", msg);
+			}
+		}
+	}
+}
+
+#[tokio::test]
+async fn check_permissions_auth_enabled() {
+	let auth_enabled = true;
+	//
+	// Test common scenarios
+	//
+
+	common_permissions_checks(auth_enabled).await;
+
+	//
+	// Test Anonymous user
+	//
+
+	// When the table grants no permissions
+	{
+		let ds = Datastore::new("memory").await.unwrap().with_auth_enabled(auth_enabled);
+
+		let mut resp = ds
+			.execute(
+				"DEFINE TABLE person PERMISSIONS NONE; CREATE person;",
+				&Session::owner().with_ns("NS").with_db("DB"),
+				None,
+			)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+		assert!(res.is_ok(), "failed to create table: {:?}", res);
+
+		let mut resp = ds
+			.execute("SELECT * FROM person", &Session::default().with_ns("NS").with_db("DB"), None)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+
+		assert!(
+			res.unwrap() == Value::parse("[]"),
+			"{}",
+			"anonymous user should not be able to select if the table has no permissions"
+		);
+	}
+
+	// When the table exists and grants full permissions
+	{
+		let ds = Datastore::new("memory").await.unwrap().with_auth_enabled(auth_enabled);
+
+		let mut resp = ds
+			.execute(
+				"DEFINE TABLE person PERMISSIONS FULL; CREATE person;",
+				&Session::owner().with_ns("NS").with_db("DB"),
+				None,
+			)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+		assert!(res.is_ok(), "failed to create table: {:?}", res);
+
+		let mut resp = ds
+			.execute("SELECT * FROM person", &Session::default().with_ns("NS").with_db("DB"), None)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+
+		assert!(
+			res.unwrap() != Value::parse("[]"),
+			"{}",
+			"anonymous user should be able to select if the table has full permissions"
+		);
+	}
+}
+
+#[tokio::test]
+async fn check_permissions_auth_disabled() {
+	let auth_enabled = false;
+	//
+	// Test common scenarios
+	//
+
+	common_permissions_checks(auth_enabled).await;
+
+	//
+	// Test Anonymous user
+	//
+
+	// When the table grants no permissions
+	{
+		let ds = Datastore::new("memory").await.unwrap().with_auth_enabled(auth_enabled);
+
+		let mut resp = ds
+			.execute(
+				"DEFINE TABLE person PERMISSIONS NONE; CREATE person;",
+				&Session::owner().with_ns("NS").with_db("DB"),
+				None,
+			)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+		assert!(res.is_ok(), "failed to create table: {:?}", res);
+
+		let mut resp = ds
+			.execute("SELECT * FROM person", &Session::default().with_ns("NS").with_db("DB"), None)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+
+		assert!(
+			res.unwrap() != Value::parse("[]"),
+			"{}",
+			"anonymous user should be able to select if the table has no permissions"
+		);
+	}
+
+	// When the table exists and grants full permissions
+	{
+		let ds = Datastore::new("memory").await.unwrap().with_auth_enabled(auth_enabled);
+
+		let mut resp = ds
+			.execute(
+				"DEFINE TABLE person PERMISSIONS FULL; CREATE person;",
+				&Session::owner().with_ns("NS").with_db("DB"),
+				None,
+			)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+		assert!(res.is_ok(), "failed to create table: {:?}", res);
+
+		let mut resp = ds
+			.execute("SELECT * FROM person", &Session::default().with_ns("NS").with_db("DB"), None)
+			.await
+			.unwrap();
+		let res = resp.remove(0).output();
+
+		assert!(
+			res.unwrap() != Value::parse("[]"),
+			"{}",
+			"anonymous user should be able to select if the table has full permissions"
+		);
+	}
 }

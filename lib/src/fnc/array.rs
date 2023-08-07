@@ -1,11 +1,14 @@
 use crate::err::Error;
 use crate::sql::array::Array;
+use crate::sql::array::Clump;
 use crate::sql::array::Combine;
 use crate::sql::array::Complement;
 use crate::sql::array::Concat;
 use crate::sql::array::Difference;
 use crate::sql::array::Flatten;
 use crate::sql::array::Intersect;
+use crate::sql::array::Matches;
+use crate::sql::array::Transpose;
 use crate::sql::array::Union;
 use crate::sql::array::Uniq;
 use crate::sql::value::Value;
@@ -42,6 +45,62 @@ pub fn append((mut array, value): (Array, Value)) -> Result<Value, Error> {
 	Ok(array.into())
 }
 
+pub fn at((array, i): (Array, i64)) -> Result<Value, Error> {
+	let mut idx = i as usize;
+	if i < 0 {
+		idx = (array.len() as i64 + i) as usize;
+	}
+	Ok(array.get(idx).cloned().unwrap_or_default())
+}
+
+pub fn boolean_and((lh, rh): (Array, Array)) -> Result<Value, Error> {
+	let longest_length = lh.len().max(rh.len());
+	let mut results = Array::with_capacity(longest_length);
+	for i in 0..longest_length {
+		let lhv = lh.get(i);
+		let rhv = rh.get(i);
+		results.push(
+			(lhv.map_or(false, |v| v.is_truthy()) && rhv.map_or(false, |v| v.is_truthy())).into(),
+		);
+	}
+	Ok(results.into())
+}
+
+pub fn boolean_not((mut array,): (Array,)) -> Result<Value, Error> {
+	array.iter_mut().for_each(|v| *v = (!v.is_truthy()).into());
+	Ok(array.into())
+}
+
+pub fn boolean_or((lh, rh): (Array, Array)) -> Result<Value, Error> {
+	let longest_length = lh.len().max(rh.len());
+	let mut results = Array::with_capacity(longest_length);
+	for i in 0..longest_length {
+		let lhv = lh.get(i);
+		let rhv = rh.get(i);
+		results.push(
+			(lhv.map_or(false, |v| v.is_truthy()) || rhv.map_or(false, |v| v.is_truthy())).into(),
+		);
+	}
+	Ok(results.into())
+}
+
+pub fn boolean_xor((lh, rh): (Array, Array)) -> Result<Value, Error> {
+	let longest_length = lh.len().max(rh.len());
+	let mut results = Array::with_capacity(longest_length);
+	for i in 0..longest_length {
+		let lhv = lh.get(i);
+		let rhv = rh.get(i);
+		results.push(
+			(lhv.map_or(false, |v| v.is_truthy()) ^ rhv.map_or(false, |v| v.is_truthy())).into(),
+		);
+	}
+	Ok(results.into())
+}
+
+pub fn clump((array, clump_size): (Array, i64)) -> Result<Value, Error> {
+	Ok(array.clump(clump_size as usize).into())
+}
+
 pub fn combine((array, other): (Array, Array)) -> Result<Value, Error> {
 	Ok(array.combine(other).into())
 }
@@ -60,6 +119,37 @@ pub fn difference((array, other): (Array, Array)) -> Result<Value, Error> {
 
 pub fn distinct((array,): (Array,)) -> Result<Value, Error> {
 	Ok(array.uniq().into())
+}
+
+pub fn filter_index((array, value): (Array, Value)) -> Result<Value, Error> {
+	Ok(array
+		.iter()
+		.enumerate()
+		.filter_map(|(i, v)| {
+			if *v == value {
+				Some(Value::from(i))
+			} else {
+				None
+			}
+		})
+		.collect::<Vec<_>>()
+		.into())
+}
+
+pub fn find_index((array, value): (Array, Value)) -> Result<Value, Error> {
+	Ok(array
+		.iter()
+		.enumerate()
+		.find(|(_i, v)| **v == value)
+		.map_or(Value::Null, |(i, _v)| i.into()))
+}
+
+pub fn first((array,): (Array,)) -> Result<Value, Error> {
+	if let [first, ..] = &array[0..] {
+		Ok(first.to_owned())
+	} else {
+		Ok(Value::None)
+	}
 }
 
 pub fn flatten((array,): (Array,)) -> Result<Value, Error> {
@@ -101,8 +191,92 @@ pub fn join((arr, sep): (Array, String)) -> Result<Value, Error> {
 	Ok(arr.into_iter().map(Value::as_raw_string).collect::<Vec<_>>().join(&sep).into())
 }
 
+pub fn last((array,): (Array,)) -> Result<Value, Error> {
+	if let [.., last] = &array[0..] {
+		Ok(last.to_owned())
+	} else {
+		Ok(Value::None)
+	}
+}
+
 pub fn len((array,): (Array,)) -> Result<Value, Error> {
 	Ok(array.len().into())
+}
+
+pub fn logical_and((lh, rh): (Array, Array)) -> Result<Value, Error> {
+	let mut result_arr = Array::with_capacity(lh.len().max(rh.len()));
+	let mut iters = (lh.into_iter(), rh.into_iter());
+	for (lhv, rhv) in std::iter::from_fn(|| {
+		let r = (iters.0.next(), iters.1.next());
+		if r.0.is_none() && r.1.is_none() {
+			None
+		} else {
+			Some((r.0.unwrap_or(Value::Null), r.1.unwrap_or(Value::Null)))
+		}
+	}) {
+		let truth = lhv.is_truthy() && rhv.is_truthy();
+		let r = if lhv.is_truthy() == truth {
+			lhv
+		} else if rhv.is_truthy() == truth {
+			rhv
+		} else {
+			truth.into()
+		};
+		result_arr.push(r);
+	}
+	Ok(result_arr.into())
+}
+
+pub fn logical_or((lh, rh): (Array, Array)) -> Result<Value, Error> {
+	let mut result_arr = Array::with_capacity(lh.len().max(rh.len()));
+	let mut iters = (lh.into_iter(), rh.into_iter());
+	for (lhv, rhv) in std::iter::from_fn(|| {
+		let r = (iters.0.next(), iters.1.next());
+		if r.0.is_none() && r.1.is_none() {
+			None
+		} else {
+			Some((r.0.unwrap_or(Value::Null), r.1.unwrap_or(Value::Null)))
+		}
+	}) {
+		let truth = lhv.is_truthy() || rhv.is_truthy();
+		let r = if lhv.is_truthy() == truth {
+			lhv
+		} else if rhv.is_truthy() == truth {
+			rhv
+		} else {
+			truth.into()
+		};
+		result_arr.push(r);
+	}
+	Ok(result_arr.into())
+}
+
+pub fn logical_xor((lh, rh): (Array, Array)) -> Result<Value, Error> {
+	let mut result_arr = Array::with_capacity(lh.len().max(rh.len()));
+	let mut iters = (lh.into_iter(), rh.into_iter());
+	for (lhv, rhv) in std::iter::from_fn(|| {
+		let r = (iters.0.next(), iters.1.next());
+		if r.0.is_none() && r.1.is_none() {
+			None
+		} else {
+			Some((r.0.unwrap_or(Value::Null), r.1.unwrap_or(Value::Null)))
+		}
+	}) {
+		let truth = lhv.is_truthy() ^ rhv.is_truthy();
+		let r = if lhv.is_truthy() == truth {
+			lhv
+		} else if rhv.is_truthy() == truth {
+			rhv
+		} else {
+			truth.into()
+		};
+		result_arr.push(r);
+	}
+	Ok(result_arr.into())
+}
+
+pub fn matches((array, compare_val): (Array, Value)) -> Result<Value, Error> {
+	Ok(array.matches(compare_val).into())
 }
 
 pub fn max((array,): (Array,)) -> Result<Value, Error> {
@@ -198,6 +372,10 @@ pub fn sort((mut array, order): (Array, Option<Value>)) -> Result<Value, Error> 
 	}
 }
 
+pub fn transpose((array,): (Array,)) -> Result<Value, Error> {
+	Ok(array.transpose().into())
+}
+
 pub fn union((array, other): (Array, Array)) -> Result<Value, Error> {
 	Ok(array.union(other).into())
 }
@@ -221,7 +399,7 @@ pub mod sort {
 
 #[cfg(test)]
 mod tests {
-	use super::{join, slice};
+	use super::{at, first, join, last, slice};
 	use crate::sql::{Array, Value};
 
 	#[test]
@@ -264,5 +442,34 @@ mod tests {
 			" is not ",
 			"3.56f is not 2.72f is not 1.61f",
 		);
+	}
+
+	#[test]
+	fn array_first() {
+		fn test(arr: Array, expected: Value) {
+			assert_eq!(first((arr,)).unwrap(), expected);
+		}
+
+		test(vec!["hello", "world"].into(), "hello".into());
+		test(Array::new(), Value::None);
+	}
+
+	#[test]
+	fn array_last() {
+		fn test(arr: Array, expected: Value) {
+			assert_eq!(last((arr,)).unwrap(), expected);
+		}
+
+		test(vec!["hello", "world"].into(), "world".into());
+		test(Array::new(), Value::None);
+	}
+
+	#[test]
+	fn array_at() {
+		fn test(arr: Array, i: i64, expected: Value) {
+			assert_eq!(at((arr, i)).unwrap(), expected);
+		}
+		test(vec!["hello", "world"].into(), -2, "hello".into());
+		test(vec!["hello", "world"].into(), -3, Value::None);
 	}
 }

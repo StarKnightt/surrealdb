@@ -4,6 +4,7 @@ use crate::ctx::Context;
 use crate::dbs::{Options, Transaction};
 use crate::doc::CursorDoc;
 use crate::err::Error;
+use crate::fnc::util::string::fuzzy::Fuzzy;
 use crate::sql::array::Uniq;
 use crate::sql::array::{array, Array};
 use crate::sql::block::{block, Block};
@@ -15,6 +16,7 @@ use crate::sql::constant::{constant, Constant};
 use crate::sql::datetime::{datetime, Datetime};
 use crate::sql::duration::{duration, Duration};
 use crate::sql::edges::{edges, Edges};
+use crate::sql::ending::keyword;
 use crate::sql::error::IResult;
 use crate::sql::expression::{binary, unary, Expression};
 use crate::sql::fmt::{Fmt, Pretty};
@@ -41,8 +43,6 @@ use crate::sql::uuid::{uuid as unique, Uuid};
 use async_recursion::async_recursion;
 use chrono::{DateTime, Utc};
 use derive::Store;
-use fuzzy_matcher::skim::SkimMatcherV2;
-use fuzzy_matcher::FuzzyMatcher;
 use geo::Point;
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
@@ -50,7 +50,7 @@ use nom::character::complete::char;
 use nom::combinator::{map, opt};
 use nom::multi::separated_list0;
 use nom::multi::separated_list1;
-use once_cell::sync::Lazy;
+use nom::sequence::terminated;
 use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -61,8 +61,6 @@ use std::fmt::{self, Display, Formatter, Write};
 use std::ops::Deref;
 use std::ops::Neg;
 use std::str::FromStr;
-
-static MATCHER: Lazy<SkimMatcherV2> = Lazy::new(|| SkimMatcherV2::default().ignore_case());
 
 pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Value";
 
@@ -729,6 +727,16 @@ impl TryFrom<Value> for Number {
 		match value {
 			Value::Number(x) => Ok(x),
 			_ => Err(Error::TryFrom(value.to_string(), "Number")),
+		}
+	}
+}
+
+impl TryFrom<Value> for Datetime {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Datetime(x) => Ok(x),
+			_ => Err(Error::TryFrom(value.to_string(), "Datetime")),
 		}
 	}
 }
@@ -2322,11 +2330,11 @@ impl Value {
 	pub fn fuzzy(&self, other: &Value) -> bool {
 		match self {
 			Value::Uuid(v) => match other {
-				Value::Strand(w) => MATCHER.fuzzy_match(v.to_raw().as_str(), w.as_str()).is_some(),
+				Value::Strand(w) => v.to_raw().as_str().fuzzy_match(w.as_str()),
 				_ => false,
 			},
 			Value::Strand(v) => match other {
-				Value::Strand(w) => MATCHER.fuzzy_match(v.as_str(), w.as_str()).is_some(),
+				Value::Strand(w) => v.as_str().fuzzy_match(w.as_str()),
 				_ => false,
 			},
 			_ => self.equal(other),
@@ -2476,7 +2484,9 @@ impl Value {
 			Value::Idiom(v) => v.writeable(),
 			Value::Array(v) => v.iter().any(Value::writeable),
 			Value::Object(v) => v.iter().any(|(_, v)| v.writeable()),
-			Value::Function(v) => v.is_custom() || v.args().iter().any(Value::writeable),
+			Value::Function(v) => {
+				v.is_custom() || v.is_script() || v.args().iter().any(Value::writeable)
+			}
 			Value::Subquery(v) => v.writeable(),
 			Value::Expression(v) => v.writeable(),
 			_ => false,
@@ -2689,10 +2699,15 @@ pub fn value(i: &str) -> IResult<&str, Value> {
 pub fn single(i: &str) -> IResult<&str, Value> {
 	alt((
 		alt((
-			map(tag_no_case("NONE"), |_| Value::None),
-			map(tag_no_case("NULL"), |_| Value::Null),
-			map(tag_no_case("true"), |_| Value::Bool(true)),
-			map(tag_no_case("false"), |_| Value::Bool(false)),
+			terminated(
+				alt((
+					map(tag_no_case("NONE"), |_| Value::None),
+					map(tag_no_case("NULL"), |_| Value::Null),
+					map(tag_no_case("true"), |_| Value::Bool(true)),
+					map(tag_no_case("false"), |_| Value::Bool(false)),
+				)),
+				keyword,
+			),
 			map(idiom::multi, Value::from),
 		)),
 		alt((
@@ -2784,6 +2799,7 @@ pub fn start(i: &str) -> IResult<&str, Value> {
 /// Used in CREATE, UPDATE, and DELETE clauses
 pub fn what(i: &str) -> IResult<&str, Value> {
 	alt((
+		map(idiom::multi, Value::from),
 		map(function, Value::from),
 		map(subquery, Value::from),
 		map(constant, Value::from),
@@ -2937,8 +2953,8 @@ mod tests {
 		assert_eq!(24, std::mem::size_of::<crate::sql::idiom::Idiom>());
 		assert_eq!(24, std::mem::size_of::<crate::sql::table::Table>());
 		assert_eq!(56, std::mem::size_of::<crate::sql::thing::Thing>());
-		assert_eq!(48, std::mem::size_of::<crate::sql::model::Model>());
-		assert_eq!(16, std::mem::size_of::<crate::sql::regex::Regex>());
+		assert_eq!(40, std::mem::size_of::<crate::sql::model::Model>());
+		assert_eq!(32, std::mem::size_of::<crate::sql::regex::Regex>());
 		assert_eq!(8, std::mem::size_of::<Box<crate::sql::range::Range>>());
 		assert_eq!(8, std::mem::size_of::<Box<crate::sql::edges::Edges>>());
 		assert_eq!(8, std::mem::size_of::<Box<crate::sql::function::Function>>());
@@ -2960,10 +2976,10 @@ mod tests {
 	#[test]
 	fn serialize_deserialize() {
 		let val = Value::parse(
-			"{ test: { something: [1, 'two', null, test:tobie, { something: false }] } }",
+			"{ test: { something: [1, 'two', null, test:tobie, { trueee: false, noneee: nulll }] } }",
 		);
 		let res = Value::parse(
-			"{ test: { something: [1, 'two', null, test:tobie, { something: false }] } }",
+			"{ test: { something: [1, 'two', null, test:tobie, { trueee: false, noneee: nulll }] } }",
 		);
 		let enc: Vec<u8> = val.into();
 		let dec: Value = enc.into();
