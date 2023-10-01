@@ -27,7 +27,7 @@ impl SyncDistinct {
 	}
 
 	fn is_distinct(ctx: &Context<'_>, i: &Iterable) -> bool {
-		if let Iterable::Index(t, ir, _) = i {
+		if let Iterable::Index(t, ir) = i {
 			if let Some(pla) = ctx.get_query_planner() {
 				if let Some(exe) = pla.get_query_executor(&t.0) {
 					return exe.is_distinct(*ir);
@@ -50,7 +50,7 @@ impl SyncDistinct {
 	}
 
 	pub(super) fn check_already_processed(&mut self, pro: &Processed) -> bool {
-		if let Some(key) = pro.rid.as_ref().map(|rid| rid.to_vec()) {
+		if let Some(key) = pro.rid.as_ref().map(std::convert::Into::<Vec<u8>>::into) {
 			if self.processed.get(&key).is_some() {
 				true
 			} else {

@@ -59,6 +59,8 @@ use std::marker::PhantomData;
 use std::mem;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::fs::OpenOptions;
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,9 +68,9 @@ use tokio::io;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::io::AsyncReadExt;
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::io::AsyncWrite;
-#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::AsyncWriteExt;
+
+const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// In-memory database
 ///
@@ -77,11 +79,12 @@ use tokio::io::AsyncWriteExt;
 /// Instantiating a global instance
 ///
 /// ```
+/// use once_cell::sync::Lazy;
 /// use surrealdb::{Result, Surreal};
 /// use surrealdb::engine::local::Db;
 /// use surrealdb::engine::local::Mem;
 ///
-/// static DB: Surreal<Db> = Surreal::init();
+/// static DB: Lazy<Surreal<Db>> = Lazy::new(Surreal::init);
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
@@ -107,13 +110,14 @@ use tokio::io::AsyncWriteExt;
 /// Instantiating an in-memory strict instance
 ///
 /// ```
-/// use surrealdb::opt::Strict;
+/// use surrealdb::opt::Config;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::Mem;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// let db = Surreal::new::<Mem>(Strict).await?;
+/// let config = Config::default().strict();
+/// let db = Surreal::new::<Mem>(config).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -144,11 +148,12 @@ pub struct Mem;
 /// ```no_run
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// use surrealdb::opt::Strict;
+/// use surrealdb::opt::Config;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::File;
 ///
-/// let db = Surreal::new::<File>(("temp.db", Strict)).await?;
+/// let config = Config::default().strict();
+/// let db = Surreal::new::<File>(("temp.db", config)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -179,11 +184,12 @@ pub struct File;
 /// ```no_run
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// use surrealdb::opt::Strict;
+/// use surrealdb::opt::Config;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::RocksDb;
 ///
-/// let db = Surreal::new::<RocksDb>(("temp.db", Strict)).await?;
+/// let config = Config::default().strict();
+/// let db = Surreal::new::<RocksDb>(("temp.db", config)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -214,11 +220,12 @@ pub struct RocksDb;
 /// ```no_run
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// use surrealdb::opt::Strict;
+/// use surrealdb::opt::Config;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::SpeeDb;
 ///
-/// let db = Surreal::new::<SpeeDb>(("temp.db", Strict)).await?;
+/// let config = Config::default().strict();
+/// let db = Surreal::new::<SpeeDb>(("temp.db", config)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -249,11 +256,12 @@ pub struct SpeeDb;
 /// ```no_run
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// use surrealdb::opt::Strict;
+/// use surrealdb::opt::Config;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::IndxDb;
 ///
-/// let db = Surreal::new::<IndxDb>(("MyDatabase", Strict)).await?;
+/// let config = Config::default().strict();
+/// let db = Surreal::new::<IndxDb>(("MyDatabase", config)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -284,11 +292,12 @@ pub struct IndxDb;
 /// ```no_run
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// use surrealdb::opt::Strict;
+/// use surrealdb::opt::Config;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::TiKv;
 ///
-/// let db = Surreal::new::<TiKv>(("localhost:2379", Strict)).await?;
+/// let config = Config::default().strict();
+/// let db = Surreal::new::<TiKv>(("localhost:2379", config)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -306,7 +315,6 @@ pub struct TiKv;
 /// ```no_run
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// use surrealdb::opt::Strict;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::FDb;
 ///
@@ -320,11 +328,12 @@ pub struct TiKv;
 /// ```no_run
 /// # #[tokio::main]
 /// # async fn main() -> surrealdb::Result<()> {
-/// use surrealdb::opt::Strict;
+/// use surrealdb::opt::Config;
 /// use surrealdb::Surreal;
 /// use surrealdb::engine::local::FDb;
 ///
-/// let db = Surreal::new::<FDb>(("fdb.cluster", Strict)).await?;
+/// let config = Config::default().strict();
+/// let db = Surreal::new::<FDb>(("fdb.cluster", config)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -343,7 +352,7 @@ impl Surreal<Db> {
 	/// Connects to a specific database endpoint, saving the connection on the static client
 	pub fn connect<P>(&self, address: impl IntoEndpoint<P, Client = Db>) -> Connect<Db, ()> {
 		Connect {
-			router: Some(&self.router),
+			router: self.router.clone(),
 			address: address.into_endpoint(),
 			capacity: 0,
 			client: PhantomData,
@@ -393,9 +402,46 @@ async fn take(one: bool, responses: Vec<Response>) -> Result<Value> {
 	}
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+async fn export(
+	kvs: &Datastore,
+	sess: &Session,
+	ns: String,
+	db: String,
+	chn: channel::Sender<Vec<u8>>,
+) -> Result<()> {
+	if let Err(error) = kvs.export(sess, ns, db, chn).await?.await {
+		if let crate::error::Db::Channel(message) = error {
+			// This is not really an error. Just logging it for improved visibility.
+			trace!("{message}");
+			return Ok(());
+		}
+		return Err(error.into());
+	}
+	Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn copy<'a, R, W>(
+	path: PathBuf,
+	reader: &'a mut R,
+	writer: &'a mut W,
+) -> std::result::Result<(), crate::Error>
+where
+	R: tokio::io::AsyncRead + Unpin + ?Sized,
+	W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+	io::copy(reader, writer).await.map(|_| ()).map_err(|error| {
+		crate::Error::Api(crate::error::Api::FileRead {
+			path,
+			error,
+		})
+	})
+}
+
 async fn router(
 	(_, method, param): (i64, Method, Param),
-	kvs: &Datastore,
+	kvs: &Arc<Datastore>,
 	session: &mut Session,
 	vars: &mut BTreeMap<String, Value>,
 ) -> Result<DbResponse> {
@@ -504,49 +550,30 @@ async fn router(
 		Method::Export | Method::Import => unreachable!(),
 		#[cfg(not(target_arch = "wasm32"))]
 		Method::Export => {
-			let (tx, rx) = channel::new::<Vec<u8>>(1);
 			let ns = session.ns.clone().unwrap_or_default();
 			let db = session.db.clone().unwrap_or_default();
-			let (mut writer, mut reader) = io::duplex(10_240);
+			let (tx, rx) = channel::new(1);
 
-			// Write to channel.
-			async fn export_with_err(
-				kvs: &Datastore,
-				sess: &Session,
-				ns: String,
-				db: String,
-				chn: channel::Sender<Vec<u8>>,
-			) -> std::result::Result<(), crate::Error> {
-				let export = kvs.prepare_export(sess, ns, db, chn).await.map_err(|error| {
-					error!("Error preparing export: {error}");
-					crate::Error::Db(error)
-				})?;
+			match (param.file, param.sender) {
+				(Some(path), None) => {
+					let (mut writer, mut reader) = io::duplex(10_240);
 
-				export.await.map_err(|error| {
-					error!("Error processing export: {error}");
-					crate::Error::Db(error)
-				})
-			}
+					// Write to channel.
+					let export = export(kvs, session, ns, db, tx);
 
-			let export = export_with_err(kvs, session, ns, db, tx);
+					// Read from channel and write to pipe.
+					let bridge = async move {
+						while let Ok(value) = rx.recv().await {
+							if writer.write_all(&value).await.is_err() {
+								// Broken pipe. Let either side's error be propagated.
+								break;
+							}
+						}
+						Ok(())
+					};
 
-			// Read from channel and write to pipe.
-			let bridge = async move {
-				while let Ok(value) = rx.recv().await {
-					if writer.write_all(&value).await.is_err() {
-						// Broken pipe. Let either side's error be propagated.
-						break;
-					}
-				}
-				Ok(())
-			};
-
-			// Output to stdout or file.
-			let path = param.file.expect("file to export into");
-			let mut output: Box<dyn AsyncWrite + Unpin + Send> = match path.to_str().unwrap() {
-				"-" => Box::new(io::stdout()),
-				_ => {
-					let file = match OpenOptions::new()
+					// Output to stdout or file.
+					let mut output = match OpenOptions::new()
 						.write(true)
 						.create(true)
 						.truncate(true)
@@ -562,31 +589,37 @@ async fn router(
 							.into());
 						}
 					};
-					Box::new(file)
-				}
-			};
 
-			// Copy from pipe to output.
-			async fn copy_with_err<'a, R, W>(
-				path: PathBuf,
-				reader: &'a mut R,
-				writer: &'a mut W,
-			) -> std::result::Result<(), crate::Error>
-			where
-				R: tokio::io::AsyncRead + Unpin + ?Sized,
-				W: tokio::io::AsyncWrite + Unpin + ?Sized,
-			{
-				io::copy(reader, writer).await.map(|_| ()).map_err(|error| {
-					crate::Error::Api(crate::error::Api::FileRead {
-						path,
-						error,
-					})
-				})
+					// Copy from pipe to output.
+					let copy = copy(path, &mut reader, &mut output);
+
+					tokio::try_join!(export, bridge, copy)?;
+				}
+				(None, Some(backup)) => {
+					let kvs = kvs.clone();
+					let session = session.clone();
+					tokio::spawn(async move {
+						let export = async {
+							if let Err(error) = export(&kvs, &session, ns, db, tx).await {
+								let _ = backup.send(Err(error)).await;
+							}
+						};
+
+						let bridge = async {
+							while let Ok(bytes) = rx.recv().await {
+								if backup.send(Ok(bytes)).await.is_err() {
+									break;
+								}
+							}
+						};
+
+						tokio::join!(export, bridge);
+					});
+				}
+				_ => unreachable!(),
 			}
 
-			let copy = copy_with_err(path, &mut reader, &mut output);
-
-			tokio::try_join!(export, bridge, copy).map(|_| DbResponse::Other(Value::None))
+			Ok(DbResponse::Other(Value::None))
 		}
 		#[cfg(not(target_arch = "wasm32"))]
 		Method::Import => {
@@ -622,7 +655,10 @@ async fn router(
 				[Value::Strand(Strand(key)), value] => (mem::take(key), mem::take(value)),
 				_ => unreachable!(),
 			};
-			vars.insert(key, value);
+			match kvs.compute(value, &*session, Some(vars.clone())).await? {
+				Value::None => vars.remove(&key),
+				v => vars.insert(key, v),
+			};
 			Ok(DbResponse::Other(Value::None))
 		}
 		Method::Unset => {

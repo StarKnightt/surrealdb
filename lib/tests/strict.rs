@@ -1,8 +1,9 @@
 mod parse;
 use parse::Parse;
+mod helpers;
+use helpers::new_ds;
 use surrealdb::dbs::Session;
 use surrealdb::err::Error;
-use surrealdb::kvs::Datastore;
 use surrealdb::sql::Value;
 
 #[tokio::test]
@@ -15,7 +16,7 @@ async fn strict_mode_no_namespace() -> Result<(), Error> {
 		CREATE test:tester;
 		SELECT * FROM test;
 	";
-	let dbs = Datastore::new("memory").await?.with_strict_mode(true);
+	let dbs = new_ds().await?.with_strict_mode(true);
 	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 5);
@@ -73,7 +74,7 @@ async fn strict_mode_no_database() -> Result<(), Error> {
 		CREATE test:tester;
 		SELECT * FROM test;
 	";
-	let dbs = Datastore::new("memory").await?.with_strict_mode(true);
+	let dbs = new_ds().await?.with_strict_mode(true);
 	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 5);
@@ -126,7 +127,7 @@ async fn strict_mode_no_table() -> Result<(), Error> {
 		CREATE test:tester;
 		SELECT * FROM test;
 	";
-	let dbs = Datastore::new("memory").await?.with_strict_mode(true);
+	let dbs = new_ds().await?.with_strict_mode(true);
 	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 5);
@@ -174,7 +175,7 @@ async fn strict_mode_all_ok() -> Result<(), Error> {
 		CREATE test:tester;
 		SELECT * FROM test;
 	";
-	let dbs = Datastore::new("memory").await?.with_strict_mode(true);
+	let dbs = new_ds().await?.with_strict_mode(true);
 	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 6);
@@ -213,7 +214,7 @@ async fn loose_mode_all_ok() -> Result<(), Error> {
 		INFO FOR DB;
 		INFO FOR TABLE test;
 	";
-	let dbs = Datastore::new("memory").await?;
+	let dbs = new_ds().await?;
 	let ses = Session::owner().with_ns("test").with_db("test");
 	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 7);
@@ -242,7 +243,6 @@ async fn loose_mode_all_ok() -> Result<(), Error> {
 	let val = Value::parse(
 		"{
 			databases: { test: 'DEFINE DATABASE test' },
-			logins: {},
 			tokens: {},
 			users: {},
 		}",
@@ -253,7 +253,6 @@ async fn loose_mode_all_ok() -> Result<(), Error> {
 	let val = Value::parse(
 		"{
 			analyzers: {},
-			logins: {},
 			tokens: {},
 			functions: {},
 			params: {},
@@ -271,9 +270,26 @@ async fn loose_mode_all_ok() -> Result<(), Error> {
 			fields: { extra: 'DEFINE FIELD extra ON test VALUE true' },
 			tables: {},
 			indexes: {},
+			lives: {},
 		}",
 	);
 	assert_eq!(tmp, val);
 	//
+	Ok(())
+}
+
+#[tokio::test]
+async fn strict_define_in_transaction() -> Result<(), Error> {
+	let sql = r"
+		DEFINE NS test; DEFINE DB test;
+		USE NS test DB test;
+		BEGIN;
+		DEFINE TABLE test;
+		DEFINE FIELD test ON test; -- Panic used to be caused when you add this query within the transaction
+		COMMIT;
+	";
+	let dbs = new_ds().await?.with_strict_mode(true);
+	let ses = Session::owner().with_ns("test").with_db("test");
+	dbs.execute(sql, &ses, None).await?;
 	Ok(())
 }

@@ -3,8 +3,10 @@ use crate::dbs::Options;
 use crate::dbs::Transaction;
 use crate::doc::CursorDoc;
 use crate::err::Error;
+use crate::iam::Auth;
 use crate::sql::comment::shouldbespace;
 use crate::sql::cond::{cond, Cond};
+use crate::sql::error::expect_tag_no_case;
 use crate::sql::error::IResult;
 use crate::sql::fetch::{fetch, Fetchs};
 use crate::sql::field::{fields, Fields};
@@ -15,13 +17,17 @@ use crate::sql::Uuid;
 use derive::Store;
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
+use nom::combinator::cut;
+use nom::combinator::into;
 use nom::combinator::map;
 use nom::combinator::opt;
 use nom::sequence::preceded;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Store, Hash)]
+#[revisioned(revision = 2)]
 pub struct LiveStatement {
 	pub id: Uuid,
 	pub node: Uuid,
@@ -29,11 +35,24 @@ pub struct LiveStatement {
 	pub what: Value,
 	pub cond: Option<Cond>,
 	pub fetch: Option<Fetchs>,
-
-	// Non-query properties that are necessary for storage or otherwise carrying information
-
-	// When a live query is archived, this should be the node ID that archived the query.
-	pub archived: Option<Uuid>,
+	// When a live query is marked for archiving, this will
+	// be set to the node ID that archived the query. This
+	// is an internal property, set by the database runtime.
+	// This is optional, and os only set when archived.
+	pub(crate) archived: Option<Uuid>,
+	// When a live query is created, we must also store the
+	// authenticated session of the user who made the query,
+	// so we can chack it later when sending notifications.
+	// This is optional as it is only set by the database
+	// runtime when storing the live query to storage.
+	#[revision(start = 2)]
+	pub(crate) session: Option<Value>,
+	// When a live query is created, we must also store the
+	// authenticated session of the user who made the query,
+	// so we can chack it later when sending notifications.
+	// This is optional as it is only set by the database
+	// runtime when storing the live query to storage.
+	pub(crate) auth: Option<Auth>,
 }
 
 impl LiveStatement {
@@ -49,24 +68,32 @@ impl LiveStatement {
 		opt.realtime()?;
 		// Valid options?
 		opt.valid_for_db()?;
+		// Get the Node ID
+		let nid = opt.id()?;
+		// Check that auth has been set
+		let mut stm = LiveStatement {
+			// Use the current session authentication
+			// for when we store the LIVE Statement
+			session: ctx.value("session").cloned(),
+			// Use the current session authentication
+			// for when we store the LIVE Statement
+			auth: Some(opt.auth.as_ref().clone()),
+			// Clone the rest of the original fields
+			// from the LIVE statement to the new one
+			..self.clone()
+		};
+		let id = stm.id.0;
 		// Claim transaction
 		let mut run = txn.lock().await;
 		// Process the live query table
-		match self.what.compute(ctx, opt, txn, doc).await? {
+		match stm.what.compute(ctx, opt, txn, doc).await? {
 			Value::Table(tb) => {
-				// Clone the current statement
-				let mut stm = self.clone();
 				// Store the current Node ID
-				if let Err(e) = opt.id() {
-					trace!("No ID for live query {:?}, error={:?}", stm, e)
-				}
-				stm.node = Uuid(opt.id()?);
+				stm.node = nid.into();
 				// Insert the node live query
-				let key = crate::key::node::lq::new(opt.id()?, self.id.0, opt.ns(), opt.db());
-				run.putc(key, tb.as_str(), None).await?;
+				run.putc_ndlq(nid, id, opt.ns(), opt.db(), tb.as_str(), None).await?;
 				// Insert the table live query
-				let key = crate::key::table::lq::new(opt.ns(), opt.db(), &tb, self.id.0);
-				run.putc(key, stm, None).await?;
+				run.putc_tblq(opt.ns(), opt.db(), &tb, stm, None).await?;
 			}
 			v => {
 				return Err(Error::LiveStatement {
@@ -75,7 +102,7 @@ impl LiveStatement {
 			}
 		};
 		// Return the query id
-		Ok(self.id.clone().into())
+		Ok(id.into())
 	}
 
 	pub(crate) fn archive(mut self, node_id: Uuid) -> LiveStatement {
@@ -98,25 +125,29 @@ impl fmt::Display for LiveStatement {
 }
 
 pub fn live(i: &str) -> IResult<&str, LiveStatement> {
-	let (i, _) = tag_no_case("LIVE SELECT")(i)?;
+	let (i, _) = tag_no_case("LIVE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, expr) = alt((map(tag_no_case("DIFF"), |_| Fields::default()), fields))(i)?;
+	let (i, _) = tag_no_case("SELECT")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, _) = tag_no_case("FROM")(i)?;
-	let (i, _) = shouldbespace(i)?;
-	let (i, what) = alt((map(param, Value::from), map(table, Value::from)))(i)?;
-	let (i, cond) = opt(preceded(shouldbespace, cond))(i)?;
-	let (i, fetch) = opt(preceded(shouldbespace, fetch))(i)?;
-	Ok((
-		i,
-		LiveStatement {
-			id: Uuid::new_v4(),
-			node: Uuid::new_v4(),
-			expr,
-			what,
-			cond,
-			fetch,
-			archived: None,
-		},
-	))
+	cut(|i| {
+		let (i, expr) = alt((map(tag_no_case("DIFF"), |_| Fields::default()), fields))(i)?;
+		let (i, _) = shouldbespace(i)?;
+		let (i, _) = expect_tag_no_case("FROM")(i)?;
+		let (i, _) = shouldbespace(i)?;
+		let (i, what) = alt((into(param), into(table)))(i)?;
+		let (i, cond) = opt(preceded(shouldbespace, cond))(i)?;
+		let (i, fetch) = opt(preceded(shouldbespace, fetch))(i)?;
+		Ok((
+			i,
+			LiveStatement {
+				id: Uuid::new_v4(),
+				node: Uuid::new_v4(),
+				expr,
+				what,
+				cond,
+				fetch,
+				..Default::default()
+			},
+		))
+	})(i)
 }

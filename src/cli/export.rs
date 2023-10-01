@@ -3,8 +3,11 @@ use crate::cli::abstraction::{
 };
 use crate::err::Error;
 use clap::Args;
+use futures_util::StreamExt;
 use surrealdb::engine::any::connect;
 use surrealdb::opt::auth::Root;
+use surrealdb::opt::Config;
+use tokio::io::{self, AsyncWriteExt};
 
 #[derive(Args, Debug)]
 pub struct ExportCommandArguments {
@@ -51,7 +54,7 @@ pub async fn init(
 		// * For local engines, here we enable authentication and in the signin below we actually authenticate.
 		// * For remote engines, we connect to the endpoint and then signin.
 		#[cfg(feature = "has-storage")]
-		let address = (endpoint, root);
+		let address = (endpoint, Config::new().user(root));
 		#[cfg(not(feature = "has-storage"))]
 		let address = endpoint;
 		let client = connect(address).await?;
@@ -66,7 +69,18 @@ pub async fn init(
 	// Use the specified namespace / database
 	client.use_ns(ns).use_db(db).await?;
 	// Export the data from the database
-	client.export(file).await?;
+	if file == "-" {
+		// Prepare the backup
+		let mut backup = client.export(()).await?;
+		// Get a handle to standard output
+		let mut stdout = io::stdout();
+		// Write the backup to standard output
+		while let Some(bytes) = backup.next().await {
+			stdout.write_all(&bytes?).await?;
+		}
+	} else {
+		client.export(file).await?;
+	}
 	info!("The SQL file was exported successfully");
 	// Everything OK
 	Ok(())

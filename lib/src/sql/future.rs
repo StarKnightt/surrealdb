@@ -8,13 +8,18 @@ use crate::sql::common::{closechevron, openchevron};
 use crate::sql::error::IResult;
 use crate::sql::value::Value;
 use nom::bytes::complete::tag;
+use nom::combinator::cut;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use super::util::expect_delimited;
 
 pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Future";
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Future")]
+#[revisioned(revision = 1)]
 pub struct Future(pub Block);
 
 impl From<Value> for Future {
@@ -32,8 +37,6 @@ impl Future {
 		txn: &Transaction,
 		doc: Option<&CursorDoc<'_>>,
 	) -> Result<Value, Error> {
-		// Prevent long future chains
-		let opt = &opt.dive(1)?;
 		// Process the future if enabled
 		match opt.futures {
 			true => self.0.compute(ctx, opt, txn, doc).await?.ok(),
@@ -49,12 +52,12 @@ impl fmt::Display for Future {
 }
 
 pub fn future(i: &str) -> IResult<&str, Future> {
-	let (i, _) = openchevron(i)?;
-	let (i, _) = tag("future")(i)?;
-	let (i, _) = closechevron(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, v) = block(i)?;
-	Ok((i, Future(v)))
+	let (i, _) = expect_delimited(openchevron, tag("future"), closechevron)(i)?;
+	cut(|i| {
+		let (i, _) = mightbespace(i)?;
+		let (i, v) = block(i)?;
+		Ok((i, Future(v)))
+	})(i)
 }
 #[cfg(test)]
 mod tests {
@@ -67,7 +70,6 @@ mod tests {
 	fn future_expression() {
 		let sql = "<future> { 5 + 10 }";
 		let res = future(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("<future> { 5 + 10 }", format!("{}", out));
 		assert_eq!(out, Future(Block::from(Value::from(Expression::parse("5 + 10")))));

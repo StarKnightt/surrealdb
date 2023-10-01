@@ -4,12 +4,15 @@ use crate::sql::error::IResult;
 use crate::sql::fmt::Fmt;
 use crate::sql::idiom::{plain as idiom, Idiom};
 use nom::bytes::complete::tag_no_case;
+use nom::combinator::cut;
 use nom::multi::separated_list1;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Fetchs(pub Vec<Fetch>);
 
 impl Deref for Fetchs {
@@ -33,7 +36,8 @@ impl fmt::Display for Fetchs {
 	}
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Fetch(pub Idiom);
 
 impl Deref for Fetch {
@@ -52,7 +56,7 @@ impl Display for Fetch {
 pub fn fetch(i: &str) -> IResult<&str, Fetchs> {
 	let (i, _) = tag_no_case("FETCH")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = separated_list1(commas, fetch_raw)(i)?;
+	let (i, v) = cut(separated_list1(commas, fetch_raw))(i)?;
 	Ok((i, Fetchs(v)))
 }
 
@@ -71,7 +75,6 @@ mod tests {
 	fn fetch_statement() {
 		let sql = "FETCH field";
 		let res = fetch(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(out, Fetchs(vec![Fetch(Idiom::parse("field"))]));
 		assert_eq!("FETCH field", format!("{}", out));
@@ -81,7 +84,6 @@ mod tests {
 	fn fetch_statement_multiple() {
 		let sql = "FETCH field, other.field";
 		let res = fetch(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			out,

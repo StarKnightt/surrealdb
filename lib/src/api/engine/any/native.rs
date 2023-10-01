@@ -16,12 +16,12 @@ use crate::api::opt::Tls;
 use crate::api::DbResponse;
 #[allow(unused_imports)] // used by the DB engines
 use crate::api::ExtraFeatures;
+use crate::api::OnceLockExt;
 use crate::api::Result;
 use crate::api::Surreal;
 #[allow(unused_imports)]
 use crate::error::Db as DbError;
 use flume::Receiver;
-use once_cell::sync::OnceCell;
 #[cfg(feature = "protocol-http")]
 use reqwest::ClientBuilder;
 use std::collections::HashSet;
@@ -30,6 +30,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
+use std::sync::OnceLock;
 #[cfg(feature = "protocol-ws")]
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 #[cfg(feature = "protocol-ws")]
@@ -60,7 +61,7 @@ impl Connection for Any {
 			let (conn_tx, conn_rx) = flume::bounded::<Result<()>>(1);
 			let mut features = HashSet::new();
 
-			match address.endpoint.scheme() {
+			match address.url.scheme() {
 				"fdb" => {
 					#[cfg(feature = "kv-fdb")]
 					{
@@ -141,7 +142,7 @@ impl Connection for Any {
 						#[allow(unused_mut)]
 						let mut builder = ClientBuilder::new().default_headers(headers);
 						#[cfg(any(feature = "native-tls", feature = "rustls"))]
-						if let Some(tls) = address.tls_config {
+						if let Some(tls) = address.config.tls_config {
 							builder = match tls {
 								#[cfg(feature = "native-tls")]
 								Tls::Native(config) => builder.use_preconfigured_tls(config),
@@ -150,7 +151,7 @@ impl Connection for Any {
 							};
 						}
 						let client = builder.build()?;
-						let base_url = address.endpoint;
+						let base_url = address.url;
 						engine::remote::http::health(
 							client.get(base_url.join(Method::Health.as_str())?),
 						)
@@ -168,9 +169,9 @@ impl Connection for Any {
 				"ws" | "wss" => {
 					#[cfg(feature = "protocol-ws")]
 					{
-						let url = address.endpoint.join(engine::remote::ws::PATH)?;
+						let url = address.url.join(engine::remote::ws::PATH)?;
 						#[cfg(any(feature = "native-tls", feature = "rustls"))]
-						let maybe_connector = address.tls_config.map(Connector::from);
+						let maybe_connector = address.config.tls_config.map(Connector::from);
 						#[cfg(not(any(feature = "native-tls", feature = "rustls")))]
 						let maybe_connector = None;
 						let config = WebSocketConfig {
@@ -211,7 +212,7 @@ impl Connection for Any {
 			}
 
 			Ok(Surreal {
-				router: OnceCell::with_value(Arc::new(Router {
+				router: Arc::new(OnceLock::with_value(Router {
 					features,
 					conn: PhantomData,
 					sender: route_tx,

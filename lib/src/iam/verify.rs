@@ -1,10 +1,9 @@
 use crate::dbs::Session;
 use crate::err::Error;
-use crate::error;
 use crate::iam::token::Claims;
 use crate::iam::Auth;
 use crate::iam::{Actor, Level, Role};
-use crate::kvs::Datastore;
+use crate::kvs::{Datastore, LockType::*, TransactionType::*};
 use crate::sql::json;
 use crate::sql::statements::DefineUserStatement;
 use crate::sql::Algorithm;
@@ -153,14 +152,14 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Log the decoded authentication claims
 			trace!("Authenticating to scope `{}` with token `{}`", sc, tk);
 			// Create a new readonly transaction
-			let mut tx = kvs.transaction(false, false).await?;
+			let mut tx = kvs.transaction(Read, Optimistic).await?;
 			// Parse the record id
 			let id = match id {
 				Some(id) => crate::sql::thing(&id)?.into(),
 				None => Value::None,
 			};
 			// Get the scope token
-			let de = tx.get_st(&ns, &db, &sc, &tk).await?;
+			let de = tx.get_sc_token(&ns, &db, &sc, &tk).await?;
 			let cf = config(de.kind, de.code)?;
 			// Verify the token
 			decode::<Claims>(token, &cf.0, &cf.1)?;
@@ -190,7 +189,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Log the decoded authentication claims
 			trace!("Authenticating to scope `{}`", sc);
 			// Create a new readonly transaction
-			let mut tx = kvs.transaction(false, false).await?;
+			let mut tx = kvs.transaction(Read, Optimistic).await?;
 			// Parse the record id
 			let id = crate::sql::thing(&id)?;
 			// Get the scope
@@ -223,9 +222,9 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Log the decoded authentication claims
 			trace!("Authenticating to database `{}` with token `{}`", db, tk);
 			// Create a new readonly transaction
-			let mut tx = kvs.transaction(false, false).await?;
+			let mut tx = kvs.transaction(Read, Optimistic).await?;
 			// Get the database token
-			let de = tx.get_dt(&ns, &db, &tk).await?;
+			let de = tx.get_db_token(&ns, &db, &tk).await?;
 			let cf = config(de.kind, de.code)?;
 			// Verify the token
 			decode::<Claims>(token, &cf.0, &cf.1)?;
@@ -264,7 +263,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Log the decoded authentication claims
 			trace!("Authenticating to database `{}` with user `{}`", db, id);
 			// Create a new readonly transaction
-			let mut tx = kvs.transaction(false, false).await?;
+			let mut tx = kvs.transaction(Read, Optimistic).await?;
 			// Get the database user
 			let de = tx.get_db_user(&ns, &db, &id).await?;
 			let cf = config(Algorithm::Hs512, de.code)?;
@@ -292,9 +291,9 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Log the decoded authentication claims
 			trace!("Authenticating to namespace `{}` with token `{}`", ns, tk);
 			// Create a new readonly transaction
-			let mut tx = kvs.transaction(false, false).await?;
+			let mut tx = kvs.transaction(Read, Optimistic).await?;
 			// Get the namespace token
-			let de = tx.get_nt(&ns, &tk).await?;
+			let de = tx.get_ns_token(&ns, &tk).await?;
 			let cf = config(de.kind, de.code)?;
 			// Verify the token
 			decode::<Claims>(token, &cf.0, &cf.1)?;
@@ -328,7 +327,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Log the decoded authentication claims
 			trace!("Authenticating to namespace `{}` with user `{}`", ns, id);
 			// Create a new readonly transaction
-			let mut tx = kvs.transaction(false, false).await?;
+			let mut tx = kvs.transaction(Read, Optimistic).await?;
 			// Get the namespace user
 			let de = tx.get_ns_user(&ns, &id).await?;
 			let cf = config(Algorithm::Hs512, de.code)?;
@@ -354,7 +353,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Log the decoded authentication claims
 			trace!("Authenticating to root level with user `{}`", id);
 			// Create a new readonly transaction
-			let mut tx = kvs.transaction(false, false).await?;
+			let mut tx = kvs.transaction(Read, Optimistic).await?;
 			// Get the namespace user
 			let de = tx.get_root_user(&id).await?;
 			let cf = config(Algorithm::Hs512, de.code)?;
@@ -436,12 +435,14 @@ async fn verify_root_creds(
 	user: &str,
 	pass: &str,
 ) -> Result<DefineUserStatement, Error> {
-	let mut tx = ds.transaction(false, false).await?;
-	let user_res = tx.get_root_user(user).await?;
-
-	verify_pass(pass, user_res.hash.as_ref())?;
-
-	Ok(user_res)
+	// Create a new readonly transaction
+	let mut tx = ds.transaction(Read, Optimistic).await?;
+	// Fetch the specified user from storage
+	let user = tx.get_root_user(user).await?;
+	// Verify the specified password for the user
+	verify_pass(pass, user.hash.as_ref())?;
+	// Return the verified user object
+	Ok(user)
 }
 
 async fn verify_ns_creds(
@@ -450,31 +451,14 @@ async fn verify_ns_creds(
 	user: &str,
 	pass: &str,
 ) -> Result<DefineUserStatement, Error> {
-	let mut tx = ds.transaction(false, false).await?;
-
-	let user_res = match tx.get_ns_user(ns, user).await {
-		Ok(u) => Ok(u),
-		// TODO(sgirones): Remove this fallback once we remove LOGIN from the system completely. We are backwards compatible with LOGIN for now.
-		// If the USER resource is not found in the namespace, try to find the LOGIN resource
-		Err(error::Db::UserNsNotFound {
-			ns: _,
-			value: _,
-		}) => match tx.get_nl(ns, user).await {
-			Ok(u) => Ok(DefineUserStatement {
-				base: u.base,
-				name: u.name,
-				hash: u.hash,
-				code: u.code,
-				roles: vec![Role::Editor.into()],
-			}),
-			Err(e) => Err(e),
-		},
-		Err(e) => Err(e),
-	}?;
-
-	verify_pass(pass, user_res.hash.as_ref())?;
-
-	Ok(user_res)
+	// Create a new readonly transaction
+	let mut tx = ds.transaction(Read, Optimistic).await?;
+	// Fetch the specified user from storage
+	let user = tx.get_ns_user(ns, user).await?;
+	// Verify the specified password for the user
+	verify_pass(pass, user.hash.as_ref())?;
+	// Return the verified user object
+	Ok(user)
 }
 
 async fn verify_db_creds(
@@ -484,32 +468,14 @@ async fn verify_db_creds(
 	user: &str,
 	pass: &str,
 ) -> Result<DefineUserStatement, Error> {
-	let mut tx = ds.transaction(false, false).await?;
-
-	let user_res = match tx.get_db_user(ns, db, user).await {
-		Ok(u) => Ok(u),
-		// TODO(sgirones): Remove this fallback once we remove LOGIN from the system completely. We are backwards compatible with LOGIN for now.
-		// If the USER resource is not found in the database, try to find the LOGIN resource
-		Err(error::Db::UserDbNotFound {
-			ns: _,
-			db: _,
-			value: _,
-		}) => match tx.get_dl(ns, db, user).await {
-			Ok(u) => Ok(DefineUserStatement {
-				base: u.base,
-				name: u.name,
-				hash: u.hash,
-				code: u.code,
-				roles: vec![Role::Editor.into()],
-			}),
-			Err(e) => Err(e),
-		},
-		Err(e) => Err(e),
-	}?;
-
-	verify_pass(pass, user_res.hash.as_ref())?;
-
-	Ok(user_res)
+	// Create a new readonly transaction
+	let mut tx = ds.transaction(Read, Optimistic).await?;
+	// Fetch the specified user from storage
+	let user = tx.get_db_user(ns, db, user).await?;
+	// Verify the specified password for the user
+	verify_pass(pass, user.hash.as_ref())?;
+	// Return the verified user object
+	Ok(user)
 }
 
 fn verify_pass(pass: &str, hash: &str) -> Result<(), Error> {
@@ -518,8 +484,7 @@ fn verify_pass(pass: &str, hash: &str) -> Result<(), Error> {
 	// Attempt to verify the password using Argon2
 	match Argon2::default().verify_password(pass.as_ref(), &hash) {
 		Ok(_) => Ok(()),
-		// The password did not verify
-		_ => Err(Error::InvalidAuth),
+		_ => Err(Error::InvalidPass),
 	}
 }
 
@@ -596,7 +561,7 @@ mod tests {
 			};
 			let res = basic(&ds, &mut sess, "user", "invalid").await;
 
-			assert!(res.is_err(), "Unexpect successful signin: {:?}", res);
+			assert!(res.is_err(), "Unexpected successful signin: {:?}", res);
 		}
 	}
 
@@ -667,7 +632,7 @@ mod tests {
 			};
 			let res = basic(&ds, &mut sess, "user", "invalid").await;
 
-			assert!(res.is_err(), "Unexpect successful signin: {:?}", res);
+			assert!(res.is_err(), "Unexpected successful signin: {:?}", res);
 		}
 	}
 
@@ -740,7 +705,7 @@ mod tests {
 			};
 			let res = basic(&ds, &mut sess, "user", "invalid").await;
 
-			assert!(res.is_err(), "Unexpect successful signin: {:?}", res);
+			assert!(res.is_err(), "Unexpected successful signin: {:?}", res);
 		}
 	}
 

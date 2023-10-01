@@ -1,4 +1,3 @@
-use crate::cnf::PROTECTED_PARAM_NAMES;
 use crate::ctx::Context;
 use crate::dbs::response::Response;
 use crate::dbs::Notification;
@@ -8,7 +7,8 @@ use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::iam::Action;
 use crate::iam::ResourceKind;
-use crate::kvs::Datastore;
+use crate::kvs::TransactionType;
+use crate::kvs::{Datastore, LockType::*, TransactionType::*};
 use crate::sql::paths::DB;
 use crate::sql::paths::NS;
 use crate::sql::query::Query;
@@ -45,10 +45,10 @@ impl<'a> Executor<'a> {
 	/// - false if
 	///   - couldn't create transaction (sets err flag)
 	///   - a transaction has already begun
-	async fn begin(&mut self, write: bool) -> bool {
+	async fn begin(&mut self, write: TransactionType) -> bool {
 		match self.txn.as_ref() {
 			Some(_) => false,
-			None => match self.kvs.transaction(write, false).await {
+			None => match self.kvs.transaction(write, Optimistic).await {
 				Ok(v) => {
 					self.txn = Some(Arc::new(Mutex::new(v)));
 					true
@@ -62,13 +62,10 @@ impl<'a> Executor<'a> {
 	}
 
 	/// Commits the transaction if it is local.
-	/// This function takes two additional parameters that are not present in the underlying kvs::Transaction::commit() function:
-	/// ns: The namespace of the transaction
-	/// db: The database of the transaction
-	/// These parameters are used updating the changefeed.
+	///
 	/// # Return
 	///
-	/// An `Err` if the transaction could not be commited;
+	/// An `Err` if the transaction could not be committed;
 	/// otherwise returns `Ok`.
 	async fn commit(&mut self, local: bool) -> Result<(), Error> {
 		if local {
@@ -173,7 +170,7 @@ impl<'a> Executor<'a> {
 		opt.set_db(Some(db.into()));
 	}
 
-	#[instrument(name = "executor", skip_all)]
+	#[instrument(level = "debug", name = "executor", skip_all)]
 	pub async fn execute(
 		&mut self,
 		mut ctx: Context<'_>,
@@ -226,7 +223,7 @@ impl<'a> Executor<'a> {
 				}
 				// Begin a new transaction
 				Statement::Begin(_) => {
-					self.begin(true).await;
+					self.begin(Write).await;
 					continue;
 				}
 				// Cancel a running transaction
@@ -260,27 +257,17 @@ impl<'a> Executor<'a> {
 					Ok(Value::None)
 				}
 				// Process param definition statements
-				Statement::Set(mut stm) => {
+				Statement::Set(stm) => {
 					// Create a transaction
-					let loc = self.begin(stm.writeable()).await;
+					let loc = self.begin(stm.writeable().into()).await;
 					// Check the transaction
 					match self.err {
 						// We failed to create a transaction
 						true => Err(Error::TxFailure),
 						// The transaction began successfully
 						false => {
-							// Check if the variable is a protected variable
-							let res = match PROTECTED_PARAM_NAMES.contains(&stm.name.as_str()) {
-								// The variable isn't protected and can be stored
-								false => stm.compute(&ctx, &opt, &self.txn(), None).await,
-								// The user tried to set a protected variable
-								true => Err(Error::InvalidParam {
-									// Move the parameter name, as we no longer need it
-									name: std::mem::take(&mut stm.name),
-								}),
-							};
 							// Check the statement
-							match res {
+							match stm.compute(&ctx, &opt, &self.txn(), None).await {
 								Ok(val) => {
 									// Check if writeable
 									let writeable = stm.writeable();
@@ -325,7 +312,7 @@ impl<'a> Executor<'a> {
 					// Compute the statement normally
 					false => {
 						// Create a transaction
-						let loc = self.begin(stm.writeable()).await;
+						let loc = self.begin(stm.writeable().into()).await;
 						// Check the transaction
 						match self.err {
 							// We failed to create a transaction

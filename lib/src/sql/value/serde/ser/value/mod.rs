@@ -10,11 +10,14 @@ use crate::sql::value::serde::ser;
 use crate::sql::value::Value;
 use crate::sql::Block;
 use crate::sql::Bytes;
+use crate::sql::Datetime;
 use crate::sql::Duration;
 use crate::sql::Future;
 use crate::sql::Ident;
 use crate::sql::Idiom;
 use crate::sql::Param;
+use crate::sql::Query;
+use crate::sql::Statements;
 use crate::sql::Strand;
 use crate::sql::Table;
 use crate::sql::Uuid;
@@ -24,7 +27,7 @@ use ser::cast::SerializeCast;
 use ser::edges::SerializeEdges;
 use ser::expression::SerializeExpression;
 use ser::function::SerializeFunction;
-use ser::model::SerializeModel;
+use ser::mock::SerializeMock;
 use ser::range::SerializeRange;
 use ser::thing::SerializeThing;
 use ser::Serializer as _;
@@ -219,6 +222,9 @@ impl ser::Serializer for Serializer {
 			sql::param::TOKEN => {
 				Ok(Value::Param(Param(Ident(value.serialize(ser::string::Serializer.wrap())?))))
 			}
+			sql::query::TOKEN => Ok(Value::Query(Query(Statements(
+				value.serialize(ser::statement::vec::Serializer.wrap())?,
+			)))),
 			sql::array::TOKEN => Ok(Value::Array(Array(value.serialize(vec::Serializer.wrap())?))),
 			sql::object::TOKEN => {
 				Ok(Value::Object(Object(value.serialize(map::Serializer.wrap())?)))
@@ -227,7 +233,7 @@ impl ser::Serializer for Serializer {
 				Ok(Value::Uuid(Uuid(value.serialize(ser::uuid::Serializer.wrap())?)))
 			}
 			sql::datetime::TOKEN => {
-				Ok(Value::Datetime(value.serialize(ser::datetime::Serializer.wrap())?))
+				Ok(Value::Datetime(Datetime(value.serialize(ser::datetime::Serializer.wrap())?)))
 			}
 			_ => value.serialize(self.wrap()),
 		}
@@ -317,14 +323,9 @@ impl ser::Serializer for Serializer {
 		len: usize,
 	) -> Result<Self::SerializeTupleVariant, Error> {
 		Ok(match name {
-			sql::model::TOKEN => {
-				SerializeTupleVariant::Model(ser::model::Serializer.serialize_tuple_variant(
-					name,
-					variant_index,
-					variant,
-					len,
-				)?)
-			}
+			sql::mock::TOKEN => SerializeTupleVariant::Model(
+				ser::mock::Serializer.serialize_tuple_variant(name, variant_index, variant, len)?,
+			),
 			sql::function::TOKEN => {
 				SerializeTupleVariant::Function(ser::function::Serializer.serialize_tuple_variant(
 					name,
@@ -456,7 +457,7 @@ impl serde::ser::SerializeMap for SerializeMap {
 }
 
 pub(super) enum SerializeTupleVariant {
-	Model(SerializeModel),
+	Model(SerializeMock),
 	Function(SerializeFunction),
 	Unknown {
 		variant: &'static str,
@@ -511,7 +512,7 @@ impl serde::ser::SerializeTupleVariant for SerializeTupleVariant {
 
 	fn end(self) -> Result<Value, Error> {
 		match self {
-			Self::Model(model) => Ok(Value::Model(model.end()?)),
+			Self::Model(model) => Ok(Value::Mock(model.end()?)),
 			Self::Function(function) => Ok(Value::Function(Box::new(function.end()?))),
 			Self::Unknown {
 				variant,
@@ -783,9 +784,9 @@ mod tests {
 
 	#[test]
 	fn model() {
-		let model = Model::Count("foo".to_owned(), Default::default());
+		let model = Mock::Count("foo".to_owned(), Default::default());
 		let value = to_value(&model).unwrap();
-		let expected = Value::Model(model);
+		let expected = Value::Mock(model);
 		assert_eq!(value, expected);
 		assert_eq!(expected, to_value(&expected).unwrap());
 	}
@@ -863,6 +864,15 @@ mod tests {
 		let function = Box::new(Function::Normal(Default::default(), Default::default()));
 		let value = to_value(&function).unwrap();
 		let expected = Value::Function(function);
+		assert_eq!(value, expected);
+		assert_eq!(expected, to_value(&expected).unwrap());
+	}
+
+	#[test]
+	fn query() {
+		let query = sql::parse("SELECT * FROM foo").unwrap();
+		let value = to_value(&query).unwrap();
+		let expected = Value::Query(query);
 		assert_eq!(value, expected);
 		assert_eq!(expected, to_value(&expected).unwrap());
 	}

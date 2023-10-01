@@ -2,7 +2,7 @@ use crate::ctx::Context;
 use crate::dbs::Iterator;
 use crate::dbs::Options;
 use crate::dbs::Statement;
-use crate::dbs::{Iterable, Transaction};
+use crate::dbs::Transaction;
 use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
@@ -16,11 +16,15 @@ use derive::Store;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::opt;
 use nom::sequence::preceded;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Store, Hash)]
+#[revisioned(revision = 2)]
 pub struct UpdateStatement {
+	#[revision(start = 2)]
+	pub only: bool,
 	pub what: Values,
 	pub data: Option<Data>,
 	pub cond: Option<Cond>,
@@ -34,14 +38,6 @@ impl UpdateStatement {
 	pub(crate) fn writeable(&self) -> bool {
 		true
 	}
-	/// Check if this statement is for a single record
-	pub(crate) fn single(&self) -> bool {
-		match self.what.len() {
-			1 if self.what[0].is_object() => true,
-			1 if self.what[0].is_thing() => true,
-			_ => false,
-		}
-	}
 	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(
 		&self,
@@ -54,73 +50,44 @@ impl UpdateStatement {
 		opt.valid_for_db()?;
 		// Create a new iterator
 		let mut i = Iterator::new();
+		// Assign the statement
+		let stm = Statement::from(self);
 		// Ensure futures are stored
-		let opt = &opt.new_with_futures(false);
+		let opt = &opt.new_with_futures(false).with_projections(false);
 		// Loop over the update targets
 		for w in self.what.0.iter() {
 			let v = w.compute(ctx, opt, txn, doc).await?;
-			match v {
-				Value::Table(v) => i.ingest(Iterable::Table(v)),
-				Value::Thing(v) => i.ingest(Iterable::Thing(v)),
-				Value::Range(v) => i.ingest(Iterable::Range(*v)),
-				Value::Edges(v) => i.ingest(Iterable::Edges(*v)),
-				Value::Model(v) => {
-					for v in v {
-						i.ingest(Iterable::Thing(v));
-					}
-				}
-				Value::Array(v) => {
-					for v in v {
-						match v {
-							Value::Table(v) => i.ingest(Iterable::Table(v)),
-							Value::Thing(v) => i.ingest(Iterable::Thing(v)),
-							Value::Edges(v) => i.ingest(Iterable::Edges(*v)),
-							Value::Model(v) => {
-								for v in v {
-									i.ingest(Iterable::Thing(v));
-								}
-							}
-							Value::Object(v) => match v.rid() {
-								Some(v) => i.ingest(Iterable::Thing(v)),
-								None => {
-									return Err(Error::UpdateStatement {
-										value: v.to_string(),
-									})
-								}
-							},
-							v => {
-								return Err(Error::UpdateStatement {
-									value: v.to_string(),
-								})
-							}
-						};
-					}
-				}
-				Value::Object(v) => match v.rid() {
-					Some(v) => i.ingest(Iterable::Thing(v)),
-					None => {
-						return Err(Error::UpdateStatement {
-							value: v.to_string(),
-						})
-					}
+			i.prepare(ctx, opt, txn, &stm, v).await.map_err(|e| match e {
+				Error::InvalidStatementTarget {
+					value: v,
+				} => Error::UpdateStatement {
+					value: v,
 				},
-				v => {
-					return Err(Error::UpdateStatement {
-						value: v.to_string(),
-					})
-				}
-			};
+				e => e,
+			})?;
 		}
-		// Assign the statement
-		let stm = Statement::from(self);
 		// Output the results
-		i.output(ctx, opt, txn, &stm).await
+		match i.output(ctx, opt, txn, &stm).await? {
+			// This is a single record result
+			Value::Array(mut a) if self.only => match a.len() {
+				// There was exactly one result
+				1 => Ok(a.remove(0)),
+				// There were no results
+				_ => Err(Error::SingleOnlyOutput),
+			},
+			// This is standard query result
+			v => Ok(v),
+		}
 	}
 }
 
 impl fmt::Display for UpdateStatement {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "UPDATE {}", self.what)?;
+		write!(f, "UPDATE")?;
+		if self.only {
+			f.write_str(" ONLY")?
+		}
+		write!(f, " {}", self.what)?;
 		if let Some(ref v) = self.data {
 			write!(f, " {v}")?
 		}
@@ -142,6 +109,7 @@ impl fmt::Display for UpdateStatement {
 
 pub fn update(i: &str) -> IResult<&str, UpdateStatement> {
 	let (i, _) = tag_no_case("UPDATE")(i)?;
+	let (i, only) = opt(preceded(shouldbespace, tag_no_case("ONLY")))(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, what) = whats(i)?;
 	let (i, data) = opt(preceded(shouldbespace, data))(i)?;
@@ -152,6 +120,7 @@ pub fn update(i: &str) -> IResult<&str, UpdateStatement> {
 	Ok((
 		i,
 		UpdateStatement {
+			only: only.is_some(),
 			what,
 			data,
 			cond,
@@ -171,7 +140,6 @@ mod tests {
 	fn update_statement() {
 		let sql = "UPDATE test";
 		let res = update(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("UPDATE test", format!("{}", out))
 	}

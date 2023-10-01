@@ -7,6 +7,7 @@ use nom::character::complete::{anychar, char, multispace0};
 use nom::combinator::recognize;
 use nom::multi::{many0, many1};
 use nom::sequence::delimited;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
@@ -25,6 +26,7 @@ const OBJECT_BEG: char = '{';
 const OBJECT_END: char = '}';
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Script(#[serde(with = "no_nul_bytes")] pub String);
 
 impl From<String> for Script {
@@ -58,6 +60,7 @@ pub fn script(i: &str) -> IResult<&str, Script> {
 }
 
 fn script_raw(i: &str) -> IResult<&str, &str> {
+	let _diving = crate::sql::parser::depth::dive(i)?;
 	recognize(many0(alt((
 		script_comment,
 		script_object,
@@ -125,7 +128,6 @@ mod tests {
 	fn script_basic() {
 		let sql = "return true;";
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("return true;", format!("{}", out));
 		assert_eq!(out, Script::from("return true;"));
@@ -135,7 +137,6 @@ mod tests {
 	fn script_object() {
 		let sql = "return { test: true, something: { other: true } };";
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("return { test: true, something: { other: true } };", format!("{}", out));
 		assert_eq!(out, Script::from("return { test: true, something: { other: true } };"));
@@ -145,7 +146,6 @@ mod tests {
 	fn script_closure() {
 		let sql = "return this.values.map(v => `This value is ${Number(v * 3)}`);";
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			"return this.values.map(v => `This value is ${Number(v * 3)}`);",
@@ -161,7 +161,6 @@ mod tests {
 	fn script_complex() {
 		let sql = r#"return { test: true, some: { object: "some text with uneven {{{ {} \" brackets", else: false } };"#;
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			r#"return { test: true, some: { object: "some text with uneven {{{ {} \" brackets", else: false } };"#,
@@ -199,7 +198,6 @@ mod tests {
 			let x = /* something */ 45 + 2;
 		"#;
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(sql, format!("{}", out));
 		assert_eq!(out, Script::from(sql));

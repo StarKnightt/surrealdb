@@ -8,14 +8,21 @@ use crate::sql::fmt::pretty_sequence_item;
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
+use nom::combinator;
+use nom::combinator::cut;
 use nom::combinator::map;
+use nom::multi::separated_list1;
 use nom::{multi::separated_list0, sequence::tuple};
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::fmt::{self, Display, Formatter};
 use std::str;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Hash)]
+use super::error::expected;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Permissions {
 	pub select: Permission,
 	pub create: Permission,
@@ -66,13 +73,16 @@ impl Display for Permissions {
 		if self.is_full() {
 			return write!(f, " FULL");
 		}
-		let mut lines = Vec::<(Vec<char>, &Permission)>::new();
-		for (c, permission) in ['s', 'c', 'u', 'd'].into_iter().zip([
-			&self.select,
-			&self.create,
-			&self.update,
-			&self.delete,
-		]) {
+		let mut lines = Vec::<(Vec<PermissionKind>, &Permission)>::new();
+		for (c, permission) in [
+			PermissionKind::Select,
+			PermissionKind::Create,
+			PermissionKind::Update,
+			PermissionKind::Delete,
+		]
+		.into_iter()
+		.zip([&self.select, &self.create, &self.update, &self.delete])
+		{
 			if let Some((existing, _)) = lines.iter_mut().find(|(_, p)| *p == permission) {
 				existing.push(c);
 			} else {
@@ -98,13 +108,7 @@ impl Display for Permissions {
 				if i > 0 {
 					f.write_str(", ")?;
 				}
-				f.write_str(match kind {
-					's' => "select",
-					'c' => "create",
-					'u' => "update",
-					'd' => "delete",
-					_ => unreachable!(),
-				})?;
+				f.write_str(kind.as_str())?;
 			}
 			match permission {
 				Permission::Specific(_) if is_pretty() => {
@@ -119,10 +123,29 @@ impl Display for Permissions {
 	}
 }
 
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+enum PermissionKind {
+	Select,
+	Create,
+	Update,
+	Delete,
+}
+
+impl PermissionKind {
+	fn as_str(&self) -> &str {
+		match self {
+			PermissionKind::Select => "select",
+			PermissionKind::Create => "create",
+			PermissionKind::Update => "update",
+			PermissionKind::Delete => "delete",
+		}
+	}
+}
+
 pub fn permissions(i: &str) -> IResult<&str, Permissions> {
 	let (i, _) = tag_no_case("PERMISSIONS")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	alt((none, full, specific))(i)
+	cut(alt((none, full, specific)))(i)
 }
 
 fn none(i: &str) -> IResult<&str, Permissions> {
@@ -136,7 +159,7 @@ fn full(i: &str) -> IResult<&str, Permissions> {
 }
 
 fn specific(i: &str) -> IResult<&str, Permissions> {
-	let (i, perms) = separated_list0(commasorspace, permission)(i)?;
+	let (i, perms) = separated_list1(commasorspace, rule)(i)?;
 	Ok((
 		i,
 		Permissions {
@@ -144,7 +167,7 @@ fn specific(i: &str) -> IResult<&str, Permissions> {
 				.iter()
 				.find_map(|x| {
 					x.iter().find_map(|y| match y {
-						('s', ref v) => Some(v.to_owned()),
+						(PermissionKind::Select, ref v) => Some(v.to_owned()),
 						_ => None,
 					})
 				})
@@ -153,7 +176,7 @@ fn specific(i: &str) -> IResult<&str, Permissions> {
 				.iter()
 				.find_map(|x| {
 					x.iter().find_map(|y| match y {
-						('c', ref v) => Some(v.to_owned()),
+						(PermissionKind::Create, ref v) => Some(v.to_owned()),
 						_ => None,
 					})
 				})
@@ -162,7 +185,7 @@ fn specific(i: &str) -> IResult<&str, Permissions> {
 				.iter()
 				.find_map(|x| {
 					x.iter().find_map(|y| match y {
-						('u', ref v) => Some(v.to_owned()),
+						(PermissionKind::Update, ref v) => Some(v.to_owned()),
 						_ => None,
 					})
 				})
@@ -171,7 +194,7 @@ fn specific(i: &str) -> IResult<&str, Permissions> {
 				.iter()
 				.find_map(|x| {
 					x.iter().find_map(|y| match y {
-						('d', ref v) => Some(v.to_owned()),
+						(PermissionKind::Delete, ref v) => Some(v.to_owned()),
 						_ => None,
 					})
 				})
@@ -180,7 +203,8 @@ fn specific(i: &str) -> IResult<&str, Permissions> {
 	))
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub enum Permission {
 	None,
 	Full,
@@ -190,6 +214,16 @@ pub enum Permission {
 impl Default for Permission {
 	fn default() -> Self {
 		Self::Full
+	}
+}
+
+impl Permission {
+	pub fn is_none(&self) -> bool {
+		matches!(self, Permission::None)
+	}
+
+	pub fn is_full(&self) -> bool {
+		matches!(self, Permission::Full)
 	}
 }
 
@@ -203,27 +237,42 @@ impl Display for Permission {
 	}
 }
 
-fn permission(i: &str) -> IResult<&str, Vec<(char, Permission)>> {
+pub fn permission(i: &str) -> IResult<&str, Permission> {
+	expected(
+		"a permission",
+		alt((
+			combinator::value(Permission::None, tag_no_case("NONE")),
+			combinator::value(Permission::Full, tag_no_case("FULL")),
+			map(tuple((tag_no_case("WHERE"), shouldbespace, value)), |(_, _, v)| {
+				Permission::Specific(v)
+			}),
+		)),
+	)(i)
+}
+
+fn rule(i: &str) -> IResult<&str, Vec<(PermissionKind, Permission)>> {
 	let (i, _) = tag_no_case("FOR")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, kind) = separated_list0(
-		commas,
-		alt((
-			map(tag_no_case("SELECT"), |_| 's'),
-			map(tag_no_case("CREATE"), |_| 'c'),
-			map(tag_no_case("UPDATE"), |_| 'u'),
-			map(tag_no_case("DELETE"), |_| 'd'),
-		)),
-	)(i)?;
-	let (i, _) = shouldbespace(i)?;
-	let (i, expr) = alt((
-		map(tag_no_case("NONE"), |_| Permission::None),
-		map(tag_no_case("FULL"), |_| Permission::Full),
-		map(tuple((tag_no_case("WHERE"), shouldbespace, value)), |(_, _, v)| {
-			Permission::Specific(v)
-		}),
-	))(i)?;
-	Ok((i, kind.into_iter().map(|k| (k, expr.clone())).collect()))
+	cut(|i| {
+		let (i, kind) = separated_list0(
+			commas,
+			alt((
+				combinator::value(PermissionKind::Select, tag_no_case("SELECT")),
+				combinator::value(PermissionKind::Create, tag_no_case("CREATE")),
+				combinator::value(PermissionKind::Update, tag_no_case("UPDATE")),
+				combinator::value(PermissionKind::Delete, tag_no_case("DELETE")),
+			)),
+		)(i)?;
+		let (i, _) = shouldbespace(i)?;
+		let (i, expr) = alt((
+			combinator::value(Permission::None, tag_no_case("NONE")),
+			combinator::value(Permission::Full, tag_no_case("FULL")),
+			map(tuple((tag_no_case("WHERE"), shouldbespace, value)), |(_, _, v)| {
+				Permission::Specific(v)
+			}),
+		))(i)?;
+		Ok((i, kind.into_iter().map(|k| (k, expr.clone())).collect()))
+	})(i)
 }
 
 #[cfg(test)]
@@ -237,7 +286,6 @@ mod tests {
 	fn permissions_none() {
 		let sql = "PERMISSIONS NONE";
 		let res = permissions(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("PERMISSIONS NONE", format!("{}", out));
 		assert_eq!(out, Permissions::none());
@@ -247,7 +295,6 @@ mod tests {
 	fn permissions_full() {
 		let sql = "PERMISSIONS FULL";
 		let res = permissions(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("PERMISSIONS FULL", format!("{}", out));
 		assert_eq!(out, Permissions::full());
@@ -258,7 +305,6 @@ mod tests {
 		let sql =
 			"PERMISSIONS FOR select FULL, FOR create, update WHERE public = true, FOR delete NONE";
 		let res = permissions(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			"PERMISSIONS FOR select FULL, FOR create, update WHERE public = true, FOR delete NONE",
@@ -273,5 +319,12 @@ mod tests {
 				delete: Permission::None,
 			}
 		);
+	}
+
+	#[test]
+	fn no_empty_permissions() {
+		// This was previouslly allowed,
+		let sql = "PERMISSION ";
+		permission(sql).unwrap_err();
 	}
 }

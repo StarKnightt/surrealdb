@@ -86,7 +86,8 @@ SurrealDB is an end-to-end cloud-native database designed for modern application
 - **Granular access control**: SurrealDB provides row-level permissions-based access control, giving you the ability to manage data access with precision.
 
 
-View the [features](https://surrealdb.com/features), the latest [releases](https://surrealdb.com/releases), the product [roadmap](https://surrealdb.com/roadmap), and [documentation](https://surrealdb.com/docs).
+View the [features](https://surrealdb.com/features), the latest [releases](https://surrealdb.com/releases), and [documentation](https://surrealdb.com/docs).
+
 
 <img src="./img/interface.png">
 
@@ -256,7 +257,7 @@ DEFINE TABLE user SCHEMAFULL;
 DEFINE FIELD name ON TABLE user TYPE object;
 DEFINE FIELD name.first ON TABLE user TYPE string;
 DEFINE FIELD name.last ON TABLE user TYPE string;
-DEFINE FIELD email ON TABLE user TYPE string ASSERT is::email($value);
+DEFINE FIELD email ON TABLE user TYPE string ASSERT string::is::email($value);
 
 -- Add a unique index on the email field preventing duplicate values
 DEFINE INDEX email ON TABLE user COLUMNS email UNIQUE;

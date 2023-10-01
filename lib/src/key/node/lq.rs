@@ -1,8 +1,15 @@
 //! Stores a LIVE SELECT query definition on the cluster
+use crate::key::error::KeyCategory;
+use crate::key::key_req::KeyRequirements;
 use derive::Key;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// The Lq key is used to quickly discover which live queries belong to which nodes
+/// This is used in networking for clustered environments such as discovering if an event is remote or local
+/// as well as garbage collection after dead nodes
+///
+/// The value is just the table of the live query as a Strand, which is the missing information from the key path
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Key)]
 pub struct Lq<'a> {
 	__: u8,
@@ -36,6 +43,12 @@ pub fn suffix_nd(nd: &Uuid) -> Vec<u8> {
 	k.extend_from_slice(nd.as_bytes());
 	k.extend_from_slice(&[0xff]);
 	k
+}
+
+impl KeyRequirements for Lq<'_> {
+	fn key_category(&self) -> KeyCategory {
+		KeyCategory::NodeLiveQuery
+	}
 }
 
 impl<'a> Lq<'a> {

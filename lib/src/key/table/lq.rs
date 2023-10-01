@@ -1,8 +1,14 @@
 //! Stores a LIVE SELECT query definition on the table
+use crate::key::error::KeyCategory;
+use crate::key::key_req::KeyRequirements;
 use derive::Key;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Lv is used to track a live query and is cluster independent, i.e. it is tied with a ns/db/tb combo without the cl.
+/// The live statement includes the node id, so lq can be derived purely from an lv.
+///
+/// The value of the lv is the statement.
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Key)]
 pub struct Lq<'a> {
 	__: u8,
@@ -33,6 +39,12 @@ pub fn suffix(ns: &str, db: &str, tb: &str) -> Vec<u8> {
 	let mut k = super::all::new(ns, db, tb).encode().unwrap();
 	k.extend_from_slice(&[b'!', b'l', b'q', 0xff]);
 	k
+}
+
+impl KeyRequirements for Lq<'_> {
+	fn key_category(&self) -> KeyCategory {
+		KeyCategory::TableLiveQuery
+	}
 }
 
 impl<'a> Lq<'a> {

@@ -18,7 +18,6 @@ mod tikv;
 
 use crate::api::Connection;
 use crate::api::Result;
-use crate::iam::Level;
 use url::Url;
 
 use super::Config;
@@ -27,16 +26,9 @@ use super::Config;
 #[derive(Debug)]
 #[allow(dead_code)] // used by the embedded and remote connections
 pub struct Endpoint {
-	pub(crate) endpoint: Url,
-	#[allow(dead_code)] // used by the embedded database
+	pub(crate) url: Url,
+	pub(crate) path: String,
 	pub(crate) config: Config,
-	#[cfg(any(feature = "native-tls", feature = "rustls"))]
-	pub(crate) tls_config: Option<super::Tls>,
-	// Only used by the local engines
-	// `Level::No` in this context means no authentication information was configured
-	pub(crate) auth: Level,
-	pub(crate) username: String,
-	pub(crate) password: String,
 }
 
 /// A trait for converting inputs to a server address object
@@ -45,4 +37,19 @@ pub trait IntoEndpoint<Scheme> {
 	type Client: Connection;
 	/// Converts an input into a server address object
 	fn into_endpoint(self) -> Result<Endpoint>;
+}
+
+pub(crate) fn replace_tilde(path: &str) -> String {
+	let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+	path.replacen("://~", &format!("://{home}"), 1).replacen(":~", &format!(":{home}"), 1)
+}
+
+#[allow(dead_code)]
+fn path_to_string(protocol: &str, path: impl AsRef<std::path::Path>) -> String {
+	use path_clean::PathClean;
+	use std::path::Path;
+
+	let path = format!("{protocol}{}", path.as_ref().display());
+	let expanded = replace_tilde(&path);
+	Path::new(&expanded).clean().display().to_string()
 }

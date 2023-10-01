@@ -1,17 +1,20 @@
-use crate::sql::error::Error::Parser;
 use crate::sql::error::IResult;
 use crate::sql::escape::quote_str;
+use crate::sql::ParseError;
 use nom::branch::alt;
 use nom::bytes::complete::{escaped_transform, is_not, tag, take, take_while_m_n};
 use nom::character::complete::char;
 use nom::combinator::value;
 use nom::sequence::preceded;
-use nom::Err::Failure;
+use nom::Err;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::ops::{self, RangeInclusive};
 use std::str;
+
+use super::error::expected;
 
 pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Strand";
 
@@ -27,6 +30,7 @@ const TRAILING_SURROGATES: RangeInclusive<u16> = 0xDC00..=0xDFFF;
 /// A string that doesn't contain NUL bytes.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Strand")]
+#[revisioned(revision = 1)]
 pub struct Strand(#[serde(with = "no_nul_bytes")] pub String);
 
 impl From<String> for Strand {
@@ -91,7 +95,7 @@ pub fn strand(i: &str) -> IResult<&str, Strand> {
 }
 
 pub fn strand_raw(i: &str) -> IResult<&str, String> {
-	alt((strand_blank, strand_single, strand_double))(i)
+	expected("a strand", alt((strand_blank, strand_single, strand_double)))(i)
 }
 
 fn strand_blank(i: &str) -> IResult<&str, String> {
@@ -160,7 +164,11 @@ fn char_unicode_bare(i: &str) -> IResult<&str, char> {
 	// Take exactly 4 bytes
 	let (i, v) = take(4usize)(i)?;
 	// Parse them as hex, where an error indicates invalid hex digits
-	let v: u16 = u16::from_str_radix(v, 16).map_err(|_| Failure(Parser(i)))?;
+	let v: u16 = u16::from_str_radix(v, 16).map_err(|_| {
+		Err::Failure(ParseError::InvalidUnicode {
+			tried: i,
+		})
+	})?;
 
 	if LEADING_SURROGATES.contains(&v) {
 		let leading = v;
@@ -170,9 +178,15 @@ fn char_unicode_bare(i: &str) -> IResult<&str, char> {
 		// Take exactly 4 more bytes
 		let (i, v) = take(4usize)(i)?;
 		// Parse them as hex, where an error indicates invalid hex digits
-		let trailing = u16::from_str_radix(v, 16).map_err(|_| Failure(Parser(i)))?;
+		let trailing = u16::from_str_radix(v, 16).map_err(|_| {
+			Err::Failure(ParseError::InvalidUnicode {
+				tried: i,
+			})
+		})?;
 		if !TRAILING_SURROGATES.contains(&trailing) {
-			return Err(Failure(Parser(i)));
+			return Err(Err::Failure(ParseError::InvalidUnicode {
+				tried: i,
+			}));
 		}
 		// Compute the codepoint.
 		// https://datacadamia.com/data/type/text/surrogate#from_surrogate_to_character_code
@@ -181,12 +195,18 @@ fn char_unicode_bare(i: &str) -> IResult<&str, char> {
 			+ trailing as u32
 			- *TRAILING_SURROGATES.start() as u32;
 		// Convert to char
-		let v = char::from_u32(codepoint).ok_or(Failure(Parser(i)))?;
+		let v = char::from_u32(codepoint).ok_or(Err::Failure(ParseError::InvalidUnicode {
+			tried: i,
+		}))?;
 		// Return the char
 		Ok((i, v))
 	} else {
 		// We can convert this to char or error in the case of invalid Unicode character
-		let v = char::from_u32(v as u32).filter(|c| *c != 0 as char).ok_or(Failure(Parser(i)))?;
+		let v = char::from_u32(v as u32).filter(|c| *c != 0 as char).ok_or(Err::Failure(
+			ParseError::InvalidUnicode {
+				tried: i,
+			},
+		))?;
 		// Return the char
 		Ok((i, v))
 	}
@@ -201,7 +221,11 @@ fn char_unicode_bracketed(i: &str) -> IResult<&str, char> {
 	// We can convert this to u32 as the max is 0xffffff
 	let v = u32::from_str_radix(v, 16).unwrap();
 	// We can convert this to char or error in the case of invalid Unicode character
-	let v = char::from_u32(v).filter(|c| *c != 0 as char).ok_or(Failure(Parser(i)))?;
+	let v = char::from_u32(v).filter(|c| *c != 0 as char).ok_or(Err::Failure(
+		ParseError::InvalidUnicode {
+			tried: i,
+		},
+	))?;
 	// Read the } character
 	let (i, _) = char('}')(i)?;
 	// Return the char
@@ -273,7 +297,6 @@ mod tests {
 	fn strand_empty() {
 		let sql = r#""""#;
 		let res = strand(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(r#"''"#, format!("{}", out));
 		assert_eq!(out, Strand::from(""));
@@ -283,7 +306,6 @@ mod tests {
 	fn strand_single() {
 		let sql = r#"'test'"#;
 		let res = strand(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(r#"'test'"#, format!("{}", out));
 		assert_eq!(out, Strand::from("test"));
@@ -293,7 +315,6 @@ mod tests {
 	fn strand_double() {
 		let sql = r#""test""#;
 		let res = strand(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(r#"'test'"#, format!("{}", out));
 		assert_eq!(out, Strand::from("test"));
@@ -301,9 +322,8 @@ mod tests {
 
 	#[test]
 	fn strand_quoted_single() {
-		let sql = r#"'te\'st'"#;
+		let sql = r"'te\'st'";
 		let res = strand(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(r#""te'st""#, format!("{}", out));
 		assert_eq!(out, Strand::from(r#"te'st"#));
@@ -313,7 +333,6 @@ mod tests {
 	fn strand_quoted_double() {
 		let sql = r#""te\"st""#;
 		let res = strand(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(r#"'te"st'"#, format!("{}", out));
 		assert_eq!(out, Strand::from(r#"te"st"#));
@@ -323,7 +342,6 @@ mod tests {
 	fn strand_quoted_escaped() {
 		let sql = r#""te\"st\n\tand\bsome\u05d9""#;
 		let res = strand(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("'te\"st\n\tand\u{08}some\u{05d9}'", format!("{}", out));
 		assert_eq!(out, Strand::from("te\"st\n\tand\u{08}some\u{05d9}"));

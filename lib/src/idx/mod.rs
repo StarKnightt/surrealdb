@@ -1,10 +1,11 @@
+pub(crate) mod docids;
 pub(crate) mod ft;
 pub(crate) mod planner;
 pub mod trees;
 
 use crate::dbs::Options;
 use crate::err::Error;
-use crate::idx::ft::docids::DocId;
+use crate::idx::docids::DocId;
 use crate::idx::ft::terms::TermId;
 use crate::idx::trees::store::NodeId;
 use crate::key::index::bc::Bc;
@@ -18,9 +19,10 @@ use crate::key::index::bp::Bp;
 use crate::key::index::bs::Bs;
 use crate::key::index::bt::Bt;
 use crate::key::index::bu::Bu;
+use crate::key::index::vm::Vm;
 use crate::kvs::{Key, Val};
 use crate::sql::statements::DefineIndexStatement;
-use roaring::RoaringTreemap;
+use revision::Revisioned;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
@@ -171,20 +173,31 @@ impl IndexKeyBase {
 		)
 		.into()
 	}
+
+	fn new_vm_key(&self, node_id: Option<NodeId>) -> Key {
+		Vm::new(
+			self.inner.ns.as_str(),
+			self.inner.db.as_str(),
+			self.inner.tb.as_str(),
+			self.inner.ix.as_str(),
+			node_id,
+		)
+		.into()
+	}
 }
 
-/// This trait provides `bincode` based default implementations for serialization/deserialization
-trait SerdeState
+/// This trait provides `Revision` based default implementations for serialization/deserialization
+trait VersionedSerdeState
 where
-	Self: Sized + Serialize + DeserializeOwned,
+	Self: Sized + Serialize + DeserializeOwned + Revisioned,
 {
 	fn try_to_val(&self) -> Result<Val, Error> {
-		Ok(bincode::serialize(self)?)
+		let mut val = Vec::new();
+		self.serialize_revisioned(&mut val)?;
+		Ok(val)
 	}
 
 	fn try_from_val(val: Val) -> Result<Self, Error> {
-		Ok(bincode::deserialize(&val)?)
+		Ok(Self::deserialize_revisioned(&mut val.as_slice())?)
 	}
 }
-
-impl SerdeState for RoaringTreemap {}

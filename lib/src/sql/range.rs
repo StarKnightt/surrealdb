@@ -13,6 +13,7 @@ use nom::combinator::map;
 use nom::combinator::opt;
 use nom::sequence::preceded;
 use nom::sequence::terminated;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
@@ -23,6 +24,7 @@ pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Range";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Range")]
+#[revisioned(revision = 1)]
 pub struct Range {
 	#[serde(with = "no_nul_bytes")]
 	pub tb: String,
@@ -174,7 +176,6 @@ mod tests {
 	fn range_int() {
 		let sql = "person:1..100";
 		let res = range(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(r#"person:1..100"#, format!("{}", out));
 	}
@@ -183,7 +184,6 @@ mod tests {
 	fn range_array() {
 		let sql = "person:['USA', 10]..['USA', 100]";
 		let res = range(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("person:['USA', 10]..['USA', 100]", format!("{}", out));
 	}
@@ -192,7 +192,6 @@ mod tests {
 	fn range_object() {
 		let sql = "person:{ country: 'USA', position: 10 }..{ country: 'USA', position: 100 }";
 		let res = range(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			"person:{ country: 'USA', position: 10 }..{ country: 'USA', position: 100 }",

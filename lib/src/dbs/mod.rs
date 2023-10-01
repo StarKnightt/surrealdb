@@ -25,6 +25,8 @@ pub(crate) use self::statement::*;
 pub(crate) use self::transaction::*;
 pub(crate) use self::variables::*;
 
+pub mod capabilities;
+pub use self::capabilities::Capabilities;
 pub mod node;
 
 mod processor;

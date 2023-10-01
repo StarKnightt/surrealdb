@@ -7,18 +7,24 @@ use crate::sql::common::commas;
 use crate::sql::ending::field as ending;
 use crate::sql::error::IResult;
 use crate::sql::fmt::Fmt;
-use crate::sql::idiom::{plain as idiom, Idiom};
+use crate::sql::idiom::{plain, Idiom};
+use crate::sql::parser::idiom;
 use crate::sql::part::Part;
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
+use nom::combinator::{cut, opt};
+// use nom::combinator::cut;
 use nom::multi::separated_list1;
+use nom::sequence::delimited;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::{self, Display, Formatter, Write};
 use std::ops::Deref;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Fields(pub Vec<Field>, pub bool);
 
 impl Fields {
@@ -80,7 +86,6 @@ impl Fields {
 		doc: Option<&CursorDoc<'_>>,
 		group: bool,
 	) -> Result<Value, Error> {
-		// Ensure futures are run
 		if let Some(doc) = doc {
 			self.compute_value(ctx, opt, txn, doc, group).await
 		} else {
@@ -97,6 +102,7 @@ impl Fields {
 		doc: &CursorDoc<'_>,
 		group: bool,
 	) -> Result<Value, Error> {
+		// Ensure futures are run
 		let opt = &opt.new_with_futures(true);
 		// Process the desired output
 		let mut out = match self.is_all() {
@@ -110,7 +116,7 @@ impl Fields {
 					expr,
 					alias,
 				} => {
-					let idiom = alias
+					let name = alias
 						.as_ref()
 						.map(Cow::Borrowed)
 						.unwrap_or_else(|| Cow::Owned(expr.to_idiom()));
@@ -125,7 +131,7 @@ impl Fields {
 							};
 							// Check if this is a single VALUE field expression
 							match self.single().is_some() {
-								false => out.set(ctx, opt, txn, idiom.as_ref(), x).await?,
+								false => out.set(ctx, opt, txn, name.as_ref(), x).await?,
 								true => out = x,
 							}
 						}
@@ -168,13 +174,64 @@ impl Fields {
 								}
 							}
 						}
-						// This expression is a normal field expression
-						_ => {
-							let x = expr.compute(ctx, opt, txn, Some(doc)).await?;
+						// This expression is a variable fields expression
+						Value::Function(f) if f.name() == Some("type::fields") => {
+							// Process the function using variable field projections
+							let expr = expr.compute(ctx, opt, txn, Some(doc)).await?;
 							// Check if this is a single VALUE field expression
 							match self.single().is_some() {
-								false => out.set(ctx, opt, txn, idiom.as_ref(), x).await?,
-								true => out = x,
+								false => {
+									// Get the first argument which is guaranteed to exist
+									let args = match f.args().first().unwrap() {
+										Value::Param(v) => {
+											v.compute(ctx, opt, txn, Some(doc)).await?
+										}
+										v => v.to_owned(),
+									};
+									// This value is always an array, so we can convert it
+									let expr: Vec<Value> = expr.try_into()?;
+									// This value is always an array, so we can convert it
+									let args: Vec<Value> = args.try_into()?;
+									// This value is always an array, so we can convert it
+									for (name, expr) in args.into_iter().zip(expr) {
+										// This value is always a string, so we can convert it
+										let name = idiom(&name.to_raw_string())?;
+										// Check if this is a single VALUE field expression
+										out.set(ctx, opt, txn, name.as_ref(), expr).await?
+									}
+								}
+								true => out = expr,
+							}
+						}
+						// This expression is a variable field expression
+						Value::Function(f) if f.name() == Some("type::field") => {
+							// Process the function using variable field projections
+							let expr = expr.compute(ctx, opt, txn, Some(doc)).await?;
+							// Check if this is a single VALUE field expression
+							match self.single().is_some() {
+								false => {
+									// Get the first argument which is guaranteed to exist
+									let name = match f.args().first().unwrap() {
+										Value::Param(v) => {
+											v.compute(ctx, opt, txn, Some(doc)).await?
+										}
+										v => v.to_owned(),
+									};
+									// This value is always a string, so we can convert it
+									let name = idiom(&name.to_raw_string())?;
+									// Add the projected field to the output document
+									out.set(ctx, opt, txn, name.as_ref(), expr).await?
+								}
+								true => out = expr,
+							}
+						}
+						// This expression is a normal field expression
+						_ => {
+							let expr = expr.compute(ctx, opt, txn, Some(doc)).await?;
+							// Check if this is a single VALUE field expression
+							match self.single().is_some() {
+								false => out.set(ctx, opt, txn, name.as_ref(), expr).await?,
+								true => out = expr,
 							}
 						}
 					}
@@ -192,9 +249,11 @@ pub fn fields(i: &str) -> IResult<&str, Fields> {
 fn field_one(i: &str) -> IResult<&str, Fields> {
 	let (i, _) = tag_no_case("VALUE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, f) = alt((alias, alone))(i)?;
-	let (i, _) = ending(i)?;
-	Ok((i, Fields(vec![f], true)))
+	cut(|i| {
+		let (i, f) = alone(i)?;
+		let (i, _) = ending(i)?;
+		Ok((i, Fields(vec![f], true)))
+	})(i)
 }
 
 fn field_many(i: &str) -> IResult<&str, Fields> {
@@ -203,6 +262,7 @@ fn field_many(i: &str) -> IResult<&str, Fields> {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub enum Field {
 	/// The `*` in `SELECT * FROM ...`
 	#[default]
@@ -236,7 +296,7 @@ impl Display for Field {
 }
 
 pub fn field(i: &str) -> IResult<&str, Field> {
-	alt((all, alias, alone))(i)
+	alt((all, alone))(i)
 }
 
 pub fn all(i: &str) -> IResult<&str, Field> {
@@ -246,26 +306,18 @@ pub fn all(i: &str) -> IResult<&str, Field> {
 
 pub fn alone(i: &str) -> IResult<&str, Field> {
 	let (i, expr) = value(i)?;
+	let (i, alias) =
+		if let (i, Some(_)) = opt(delimited(shouldbespace, tag_no_case("AS"), shouldbespace))(i)? {
+			let (i, alias) = cut(plain)(i)?;
+			(i, Some(alias))
+		} else {
+			(i, None)
+		};
 	Ok((
 		i,
 		Field::Single {
 			expr,
-			alias: None,
-		},
-	))
-}
-
-pub fn alias(i: &str) -> IResult<&str, Field> {
-	let (i, expr) = value(i)?;
-	let (i, _) = shouldbespace(i)?;
-	let (i, _) = tag_no_case("AS")(i)?;
-	let (i, _) = shouldbespace(i)?;
-	let (i, alias) = idiom(i)?;
-	Ok((
-		i,
-		Field::Single {
-			expr,
-			alias: Some(alias),
+			alias,
 		},
 	))
 }
@@ -279,7 +331,6 @@ mod tests {
 	fn field_all() {
 		let sql = "*";
 		let res = fields(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("*", format!("{}", out));
 	}
@@ -288,7 +339,6 @@ mod tests {
 	fn field_one() {
 		let sql = "field";
 		let res = fields(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("field", format!("{}", out));
 	}
@@ -297,7 +347,6 @@ mod tests {
 	fn field_value() {
 		let sql = "VALUE field";
 		let res = fields(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("VALUE field", format!("{}", out));
 	}
@@ -306,7 +355,6 @@ mod tests {
 	fn field_alias() {
 		let sql = "field AS one";
 		let res = fields(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("field AS one", format!("{}", out));
 	}
@@ -315,7 +363,6 @@ mod tests {
 	fn field_value_alias() {
 		let sql = "VALUE field AS one";
 		let res = fields(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("VALUE field AS one", format!("{}", out));
 	}
@@ -324,7 +371,6 @@ mod tests {
 	fn field_multiple() {
 		let sql = "field, other.field";
 		let res = fields(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("field, other.field", format!("{}", out));
 	}
@@ -333,7 +379,6 @@ mod tests {
 	fn field_aliases() {
 		let sql = "field AS one, other.field AS two";
 		let res = fields(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("field AS one, other.field AS two", format!("{}", out));
 	}
@@ -341,7 +386,6 @@ mod tests {
 	#[test]
 	fn field_value_only_one() {
 		let sql = "VALUE field, other.field";
-		let res = fields(sql);
-		assert!(res.is_ok());
+		fields(sql).unwrap_err();
 	}
 }

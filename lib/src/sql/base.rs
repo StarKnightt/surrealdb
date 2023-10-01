@@ -3,11 +3,15 @@ use crate::sql::error::IResult;
 use crate::sql::ident::{ident, Ident};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
-use nom::combinator::map;
+use nom::combinator::{cut, value};
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+use super::error::expected;
+
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub enum Base {
 	Root,
 	Ns,
@@ -33,29 +37,24 @@ impl fmt::Display for Base {
 }
 
 pub fn base(i: &str) -> IResult<&str, Base> {
-	alt((
-		map(tag_no_case("NAMESPACE"), |_| Base::Ns),
-		map(tag_no_case("DATABASE"), |_| Base::Db),
-		map(tag_no_case("ROOT"), |_| Base::Root),
-		map(tag_no_case("NS"), |_| Base::Ns),
-		map(tag_no_case("DB"), |_| Base::Db),
-		map(tag_no_case("KV"), |_| Base::Root),
-	))(i)
+	expected(
+		"a base, one of NAMESPACE, DATABASE, ROOT or KV",
+		alt((
+			value(Base::Ns, tag_no_case("NAMESPACE")),
+			value(Base::Db, tag_no_case("DATABASE")),
+			value(Base::Root, tag_no_case("ROOT")),
+			value(Base::Ns, tag_no_case("NS")),
+			value(Base::Db, tag_no_case("DB")),
+			value(Base::Root, tag_no_case("KV")),
+		)),
+	)(i)
 }
 
 pub fn base_or_scope(i: &str) -> IResult<&str, Base> {
-	alt((
-		map(tag_no_case("NAMESPACE"), |_| Base::Ns),
-		map(tag_no_case("DATABASE"), |_| Base::Db),
-		map(tag_no_case("ROOT"), |_| Base::Root),
-		map(tag_no_case("NS"), |_| Base::Ns),
-		map(tag_no_case("DB"), |_| Base::Db),
-		map(tag_no_case("KV"), |_| Base::Root),
-		|i| {
-			let (i, _) = tag_no_case("SCOPE")(i)?;
-			let (i, _) = shouldbespace(i)?;
-			let (i, v) = ident(i)?;
-			Ok((i, Base::Sc(v)))
-		},
-	))(i)
+	alt((base, |i| {
+		let (i, _) = tag_no_case("SCOPE")(i)?;
+		let (i, _) = shouldbespace(i)?;
+		let (i, v) = cut(ident)(i)?;
+		Ok((i, Base::Sc(v)))
+	}))(i)
 }

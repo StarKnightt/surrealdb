@@ -24,7 +24,7 @@ pub enum ClientIp {
 	Socket,
 	/// Cloudflare connecting IP
 	#[clap(name = "CF-Connecting-IP")]
-	CfConectingIp,
+	CfConnectingIp,
 	/// Fly.io client IP
 	#[clap(name = "Fly-Client-IP")]
 	FlyClientIp,
@@ -34,6 +34,9 @@ pub enum ClientIp {
 	/// Nginx real IP
 	#[clap(name = "X-Real-IP")]
 	XRealIp,
+	/// Industry standard header used by many proxies
+	#[clap(name = "X-Forwarded-For")]
+	XForwardedFor,
 }
 
 impl std::fmt::Display for ClientIp {
@@ -41,10 +44,11 @@ impl std::fmt::Display for ClientIp {
 		match self {
 			ClientIp::None => write!(f, "None"),
 			ClientIp::Socket => write!(f, "Socket"),
-			ClientIp::CfConectingIp => write!(f, "CF-Connecting-IP"),
+			ClientIp::CfConnectingIp => write!(f, "CF-Connecting-IP"),
 			ClientIp::FlyClientIp => write!(f, "Fly-Client-IP"),
 			ClientIp::TrueClientIP => write!(f, "True-Client-IP"),
 			ClientIp::XRealIp => write!(f, "X-Real-IP"),
+			ClientIp::XForwardedFor => write!(f, "X-Forwarded-For"),
 		}
 	}
 }
@@ -54,10 +58,11 @@ impl ClientIp {
 		match self {
 			ClientIp::None => false,
 			ClientIp::Socket => false,
-			ClientIp::CfConectingIp => true,
+			ClientIp::CfConnectingIp => true,
 			ClientIp::FlyClientIp => true,
 			ClientIp::TrueClientIP => true,
 			ClientIp::XRealIp => true,
+			ClientIp::XForwardedFor => true,
 		}
 	}
 }

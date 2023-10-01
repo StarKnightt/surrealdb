@@ -2,10 +2,14 @@ use crate::ctx::Context;
 use crate::dbs::{Options, Transaction};
 use crate::doc::CursorDoc;
 use crate::err::Error;
+use crate::iam::Action;
 use crate::sql::error::IResult;
 use crate::sql::ident::{ident, Ident};
 use crate::sql::value::Value;
+use crate::sql::Permission;
 use nom::character::complete::char;
+use nom::combinator::cut;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
@@ -15,6 +19,7 @@ pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Param";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Param")]
+#[revisioned(revision = 1)]
 pub struct Param(pub Ident);
 
 impl From<Ident> for Param {
@@ -66,14 +71,40 @@ impl Param {
 				Some(v) => v.compute(ctx, opt, txn, doc).await,
 				// The param has not been set locally
 				None => {
-					// Claim transaction
-					let mut run = txn.lock().await;
-					// Get the param definition
-					let val = run.get_pa(opt.ns(), opt.db(), v).await;
+					let val = {
+						// Claim transaction
+						let mut run = txn.lock().await;
+						// Get the param definition
+						run.get_and_cache_db_param(opt.ns(), opt.db(), v).await
+					};
 					// Check if the param has been set globally
 					match val {
 						// The param has been set globally
-						Ok(v) => Ok(v.value),
+						Ok(val) => {
+							// Check permissions
+							if opt.check_perms(Action::View) {
+								match &val.permissions {
+									Permission::Full => (),
+									Permission::None => {
+										return Err(Error::ParamPermissions {
+											name: v.to_owned(),
+										})
+									}
+									Permission::Specific(e) => {
+										// Disable permissions
+										let opt = &opt.new_with_perms(false);
+										// Process the PERMISSION clause
+										if !e.compute(ctx, opt, txn, doc).await?.is_truthy() {
+											return Err(Error::ParamPermissions {
+												name: v.to_owned(),
+											});
+										}
+									}
+								}
+							}
+							// Return the value
+							Ok(val.value.to_owned())
+						}
 						// The param has not been set globally
 						Err(_) => Ok(Value::None),
 					}
@@ -91,8 +122,10 @@ impl fmt::Display for Param {
 
 pub fn param(i: &str) -> IResult<&str, Param> {
 	let (i, _) = char('$')(i)?;
-	let (i, v) = ident(i)?;
-	Ok((i, Param::from(v)))
+	cut(|i| {
+		let (i, v) = ident(i)?;
+		Ok((i, Param::from(v)))
+	})(i)
 }
 
 #[cfg(test)]
@@ -105,7 +138,6 @@ mod tests {
 	fn param_normal() {
 		let sql = "$test";
 		let res = param(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("$test", format!("{}", out));
 		assert_eq!(out, Param::parse("$test"));
@@ -115,7 +147,6 @@ mod tests {
 	fn param_longer() {
 		let sql = "$test_and_deliver";
 		let res = param(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("$test_and_deliver", format!("{}", out));
 		assert_eq!(out, Param::parse("$test_and_deliver"));

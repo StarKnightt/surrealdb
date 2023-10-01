@@ -23,7 +23,8 @@ args = ["doc", "--open", "--no-deps", "--package", "surrealdb", "--features", "r
 [tasks.test]
 category = "LOCAL USAGE"
 command = "cargo"
-args = ["test", "--workspace"]
+env = { RUST_MIN_STACK={ value = "4194304", condition = { env_not_set = ["RUST_MIN_STACK"] } } }
+args = ["test", "--workspace", "--no-fail-fast"]
 
 # Check
 [tasks.cargo-check]
@@ -65,29 +66,35 @@ category = "LOCAL USAGE"
 command = "cargo"
 args = ["bench", "--package", "surrealdb", "--no-default-features", "--features", "kv-mem,http,scripting"]
 
+# Run
+[tasks.run]
+category = "LOCAL USAGE"
+command = "cargo"
+args = ["run", "--no-default-features", "--features", "${DEV_FEATURES}", "--", "${@}"]
+
 # Serve
 [tasks.serve]
 category = "LOCAL USAGE"
 command = "cargo"
-args = ["run", "--no-default-features", "--features", "${DEV_FEATURES}", "--", "start"]
+args = ["run", "--no-default-features", "--features", "${DEV_FEATURES}", "--", "start", "--allow-all", "${@}"]
 
 # SQL
 [tasks.sql]
 category = "LOCAL USAGE"
 command = "cargo"
-args = ["run", "--no-default-features", "--features", "${DEV_FEATURES}", "--", "sql", "--conn", "ws://0.0.0.0:8000", "--multi", "--pretty"]
+args = ["run", "--no-default-features", "--features", "${DEV_FEATURES}", "--", "sql", "--conn", "ws://0.0.0.0:8000", "--multi", "--pretty", "${@}"]
 
 # Quick
 [tasks.quick]
 category = "LOCAL USAGE"
 command = "cargo"
-args = ["build"]
+args = ["build", "${@}"]
 
 # Build
 [tasks.build]
 category = "LOCAL USAGE"
 command = "cargo"
-args = ["build", "--release"]
+args = ["build", "--release", "${@}"]
 
 # Default
 [tasks.default]

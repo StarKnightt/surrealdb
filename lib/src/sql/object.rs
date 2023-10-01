@@ -3,20 +3,23 @@ use crate::dbs::{Options, Transaction};
 use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::sql::comment::mightbespace;
+use crate::sql::common::{closebraces, openbraces};
 use crate::sql::common::{commas, val_char};
-use crate::sql::error::IResult;
+use crate::sql::error::{expected, IResult};
 use crate::sql::escape::escape_key;
 use crate::sql::fmt::{is_pretty, pretty_indent, Fmt, Pretty};
-use crate::sql::operation::{Op, Operation};
+use crate::sql::operation::Operation;
 use crate::sql::thing::Thing;
+use crate::sql::util::expect_terminator;
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
 use nom::bytes::complete::is_not;
 use nom::bytes::complete::take_while1;
 use nom::character::complete::char;
-use nom::combinator::opt;
-use nom::multi::separated_list0;
+use nom::combinator::{cut, opt};
 use nom::sequence::delimited;
+use nom::Err;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -29,6 +32,7 @@ pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Object";
 /// Invariant: Keys never contain NUL bytes.
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Object")]
+#[revisioned(revision = 1)]
 pub struct Object(#[serde(with = "no_nul_bytes_in_keys")] pub BTreeMap<String, Value>);
 
 impl From<BTreeMap<String, Value>> for Object {
@@ -57,16 +61,61 @@ impl From<Option<Self>> for Object {
 
 impl From<Operation> for Object {
 	fn from(v: Operation) -> Self {
-		Self(map! {
-			String::from("op") => Value::from(match v.op {
-				Op::None => "none",
-				Op::Add => "add",
-				Op::Remove => "remove",
-				Op::Replace => "replace",
-				Op::Change => "change",
-			}),
-			String::from("path") => v.path.to_path().into(),
-			String::from("value") => v.value,
+		Self(match v {
+			Operation::Add {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("add"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
+			},
+			Operation::Remove {
+				path,
+			} => map! {
+				String::from("op") => Value::from("remove"),
+				String::from("path") => path.to_path().into()
+			},
+			Operation::Replace {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("replace"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
+			},
+			Operation::Change {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("change"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
+			},
+			Operation::Copy {
+				path,
+				from,
+			} => map! {
+				String::from("op") => Value::from("copy"),
+				String::from("path") => path.to_path().into(),
+				String::from("from") => from.to_path().into()
+			},
+			Operation::Move {
+				path,
+				from,
+			} => map! {
+				String::from("op") => Value::from("move"),
+				String::from("path") => path.to_path().into(),
+				String::from("from") => from.to_path().into()
+			},
+			Operation::Test {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("test"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
+			},
 		})
 	}
 }
@@ -103,15 +152,59 @@ impl Object {
 	/// Convert this object to a diff-match-patch operation
 	pub fn to_operation(&self) -> Result<Operation, Error> {
 		match self.get("op") {
-			Some(o) => match self.get("path") {
-				Some(p) => Ok(Operation {
-					op: o.into(),
-					path: p.jsonpath(),
-					value: match self.get("value") {
-						Some(v) => v.clone(),
-						None => Value::Null,
-					},
-				}),
+			Some(op_val) => match self.get("path") {
+				Some(path_val) => {
+					let path = path_val.jsonpath();
+
+					let from =
+						self.get("from").map(|value| value.jsonpath()).ok_or(Error::InvalidPatch {
+							message: String::from("'from' key missing"),
+						});
+
+					let value = self.get("value").cloned().ok_or(Error::InvalidPatch {
+						message: String::from("'value' key missing"),
+					});
+
+					match op_val.clone().as_string().as_str() {
+						// Add operation
+						"add" => Ok(Operation::Add {
+							path,
+							value: value?,
+						}),
+						// Remove operation
+						"remove" => Ok(Operation::Remove {
+							path,
+						}),
+						// Replace operation
+						"replace" => Ok(Operation::Replace {
+							path,
+							value: value?,
+						}),
+						// Change operation
+						"change" => Ok(Operation::Change {
+							path,
+							value: value?,
+						}),
+						// Copy operation
+						"copy" => Ok(Operation::Copy {
+							path,
+							from: from?,
+						}),
+						// Move operation
+						"move" => Ok(Operation::Move {
+							path,
+							from: from?,
+						}),
+						// Test operation
+						"test" => Ok(Operation::Test {
+							path,
+							value: value?,
+						}),
+						unknown_op => Err(Error::InvalidPatch {
+							message: format!("unknown op '{unknown_op}'"),
+						}),
+					}
+				}
 				_ => Err(Error::InvalidPatch {
 					message: String::from("'path' key missing"),
 				}),
@@ -230,21 +323,41 @@ mod no_nul_bytes_in_keys {
 }
 
 pub fn object(i: &str) -> IResult<&str, Object> {
-	let (i, _) = char('{')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, v) = separated_list0(commas, |i| {
+	fn entry(i: &str) -> IResult<&str, (String, Value)> {
 		let (i, k) = key(i)?;
 		let (i, _) = mightbespace(i)?;
-		let (i, _) = char(':')(i)?;
+		let (i, _) = expected("`:`", char(':'))(i)?;
 		let (i, _) = mightbespace(i)?;
-		let (i, v) = value(i)?;
+		let (i, v) = cut(value)(i)?;
 		Ok((i, (String::from(k), v)))
-	})(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = opt(char(','))(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char('}')(i)?;
-	Ok((i, Object(v.into_iter().collect())))
+	}
+
+	let start = i;
+	let (i, _) = openbraces(i)?;
+	let (i, first) = match entry(i) {
+		Ok(x) => x,
+		Err(Err::Error(_)) => {
+			let (i, _) = closebraces(i)?;
+			return Ok((i, Object(BTreeMap::new())));
+		}
+		Err(Err::Failure(x)) => return Err(Err::Failure(x)),
+		Err(Err::Incomplete(x)) => return Err(Err::Incomplete(x)),
+	};
+
+	let mut tree = BTreeMap::new();
+	tree.insert(first.0, first.1);
+
+	let mut input = i;
+	while let (i, Some(_)) = opt(commas)(input)? {
+		if let (i, Some(_)) = opt(closebraces)(i)? {
+			return Ok((i, Object(tree)));
+		}
+		let (i, v) = cut(entry)(i)?;
+		tree.insert(v.0, v.1);
+		input = i
+	}
+	let (i, _) = expect_terminator(start, closebraces)(input)?;
+	Ok((i, Object(tree)))
 }
 
 pub fn key(i: &str) -> IResult<&str, &str> {
@@ -272,7 +385,6 @@ mod tests {
 	fn object_normal() {
 		let sql = "{one:1,two:2,tre:3}";
 		let res = object(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("{ one: 1, tre: 3, two: 2 }", format!("{}", out));
 		assert_eq!(out.0.len(), 3);
@@ -282,7 +394,6 @@ mod tests {
 	fn object_commas() {
 		let sql = "{one:1,two:2,tre:3,}";
 		let res = object(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("{ one: 1, tre: 3, two: 2 }", format!("{}", out));
 		assert_eq!(out.0.len(), 3);
@@ -292,7 +403,6 @@ mod tests {
 	fn object_expression() {
 		let sql = "{one:1,two:2,tre:3+1}";
 		let res = object(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("{ one: 1, tre: 3 + 1, two: 2 }", format!("{}", out));
 		assert_eq!(out.0.len(), 3);

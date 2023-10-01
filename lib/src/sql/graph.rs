@@ -14,12 +14,15 @@ use crate::sql::table::{table, tables, Tables};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::character::complete::char;
-use nom::combinator::map;
-use nom::combinator::opt;
+use nom::combinator::{map, opt};
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter, Write};
 
+use super::util::expect_delimited;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Graph {
 	pub dir: Dir,
 	pub expr: Fields,
@@ -106,22 +109,26 @@ fn simple(i: &str) -> IResult<&str, (Tables, Option<Cond>, Option<Idiom>)> {
 }
 
 fn custom(i: &str) -> IResult<&str, (Tables, Option<Cond>, Option<Idiom>)> {
-	let (i, _) = openparentheses(i)?;
-	let (i, w) = alt((any, tables))(i)?;
-	let (i, c) = opt(|i| {
-		let (i, _) = shouldbespace(i)?;
-		let (i, v) = cond(i)?;
-		Ok((i, v))
-	})(i)?;
-	let (i, a) = opt(|i| {
-		let (i, _) = shouldbespace(i)?;
-		let (i, _) = tag_no_case("AS")(i)?;
-		let (i, _) = shouldbespace(i)?;
-		let (i, v) = idiom(i)?;
-		Ok((i, v))
-	})(i)?;
-	let (i, _) = closeparentheses(i)?;
-	Ok((i, (w, c, a)))
+	expect_delimited(
+		openparentheses,
+		|i| {
+			let (i, w) = alt((any, tables))(i)?;
+			let (i, c) = opt(|i| {
+				let (i, _) = shouldbespace(i)?;
+				let (i, v) = cond(i)?;
+				Ok((i, v))
+			})(i)?;
+			let (i, a) = opt(|i| {
+				let (i, _) = shouldbespace(i)?;
+				let (i, _) = tag_no_case("AS")(i)?;
+				let (i, _) = shouldbespace(i)?;
+				let (i, v) = idiom(i)?;
+				Ok((i, v))
+			})(i)?;
+			Ok((i, (w, c, a)))
+		},
+		closeparentheses,
+	)(i)
 }
 
 fn one(i: &str) -> IResult<&str, Tables> {
@@ -142,7 +149,6 @@ mod tests {
 	fn graph_in() {
 		let sql = "<-likes";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("<-likes", format!("{}", out));
 	}
@@ -151,7 +157,6 @@ mod tests {
 	fn graph_out() {
 		let sql = "->likes";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->likes", format!("{}", out));
 	}
@@ -160,7 +165,6 @@ mod tests {
 	fn graph_both() {
 		let sql = "<->likes";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("<->likes", format!("{}", out));
 	}
@@ -169,7 +173,6 @@ mod tests {
 	fn graph_multiple() {
 		let sql = "->(likes, follows)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows)", format!("{}", out));
 	}
@@ -178,7 +181,6 @@ mod tests {
 	fn graph_aliases() {
 		let sql = "->(likes, follows AS connections)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows AS connections)", format!("{}", out));
 	}
@@ -187,7 +189,6 @@ mod tests {
 	fn graph_conditions() {
 		let sql = "->(likes, follows WHERE influencer = true)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows WHERE influencer = true)", format!("{}", out));
 	}
@@ -196,7 +197,6 @@ mod tests {
 	fn graph_conditions_aliases() {
 		let sql = "->(likes, follows WHERE influencer = true AS connections)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows WHERE influencer = true AS connections)", format!("{}", out));
 	}

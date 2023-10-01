@@ -9,7 +9,7 @@ use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// An error originating from a remote SurrealDB database.
+/// An error originating from a remote SurrealDB database
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -32,6 +32,10 @@ pub enum Error {
 	/// Tried to run database queries without initialising the connection first
 	#[error("Connection uninitialised")]
 	ConnectionUninitialised,
+
+	/// Tried to call `connect` on an instance already connected
+	#[error("Already connected")]
+	AlreadyConnected,
 
 	/// `Query::bind` not called with an object nor a key/value tuple
 	#[error("Invalid bindings: {0}")]

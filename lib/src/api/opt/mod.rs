@@ -1,16 +1,18 @@
 //! The different options and types for use in API functions
 
 pub mod auth;
+pub mod capabilities;
 
 mod config;
 mod endpoint;
+mod export;
 mod query;
 mod resource;
-mod strict;
 mod tls;
 
 use crate::api::err::Error;
 use crate::sql::constant::ConstantValue;
+use crate::sql::id::Gen;
 use crate::sql::to_value;
 use crate::sql::Thing;
 use crate::sql::Value;
@@ -23,9 +25,9 @@ use serde_json::Value as JsonValue;
 
 pub use config::*;
 pub use endpoint::*;
+pub use export::*;
 pub use query::*;
 pub use resource::*;
-pub use strict::*;
 pub use tls::*;
 
 /// Record ID
@@ -325,6 +327,11 @@ fn into_json(value: Value, simplify: bool) -> JsonValue {
 				sql::Id::String(s) => Id::String(s),
 				sql::Id::Array(arr) => Id::Array((arr, simplify).into()),
 				sql::Id::Object(obj) => Id::Object((obj, simplify).into()),
+				sql::Id::Generate(v) => match v {
+					Gen::Rand => Id::from((sql::Id::rand(), simplify)),
+					Gen::Ulid => Id::from((sql::Id::ulid(), simplify)),
+					Gen::Uuid => Id::from((sql::Id::uuid(), simplify)),
+				},
 			}
 		}
 	}
@@ -387,7 +394,7 @@ fn into_json(value: Value, simplify: bool) -> JsonValue {
 		Value::Param(param) => json!(param),
 		Value::Idiom(idiom) => json!(idiom),
 		Value::Table(table) => json!(table),
-		Value::Model(model) => json!(model),
+		Value::Mock(mock) => json!(mock),
 		Value::Regex(regex) => json!(regex),
 		Value::Block(block) => json!(block),
 		Value::Range(range) => json!(range),
@@ -402,6 +409,8 @@ fn into_json(value: Value, simplify: bool) -> JsonValue {
 		},
 		Value::Cast(cast) => json!(cast),
 		Value::Function(function) => json!(function),
+		Value::MlModel(model) => json!(model),
+		Value::Query(query) => json!(query),
 		Value::Subquery(subquery) => json!(subquery),
 		Value::Expression(expression) => json!(expression),
 	}

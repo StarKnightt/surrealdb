@@ -1,20 +1,25 @@
-use crate::cnf::PROTECTED_PARAM_NAMES;
 use crate::ctx::Context;
 use crate::dbs::{Options, Transaction};
 use crate::doc::CursorDoc;
 use crate::err::Error;
-use crate::sql::comment::{comment, mightbespace};
+use crate::sql::comment::mightbespace;
 use crate::sql::common::{closebraces, colons, openbraces};
 use crate::sql::error::IResult;
 use crate::sql::fmt::{is_pretty, pretty_indent, Fmt, Pretty};
 use crate::sql::statements::create::{create, CreateStatement};
+use crate::sql::statements::define::{define, DefineStatement};
 use crate::sql::statements::delete::{delete, DeleteStatement};
+use crate::sql::statements::foreach::{foreach, ForeachStatement};
 use crate::sql::statements::ifelse::{ifelse, IfelseStatement};
 use crate::sql::statements::insert::{insert, InsertStatement};
 use crate::sql::statements::output::{output, OutputStatement};
+use crate::sql::statements::r#break::{r#break, BreakStatement};
+use crate::sql::statements::r#continue::{r#continue, ContinueStatement};
 use crate::sql::statements::relate::{relate, RelateStatement};
+use crate::sql::statements::remove::{remove, RemoveStatement};
 use crate::sql::statements::select::{select, SelectStatement};
 use crate::sql::statements::set::{set, SetStatement};
+use crate::sql::statements::throw::{throw, ThrowStatement};
 use crate::sql::statements::update::{update, UpdateStatement};
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
@@ -22,15 +27,19 @@ use nom::combinator::map;
 use nom::multi::many0;
 use nom::multi::separated_list0;
 use nom::sequence::delimited;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter, Write};
 use std::ops::Deref;
 
+use super::util::expect_delimited;
+
 pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Block";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Block")]
+#[revisioned(revision = 1)]
 pub struct Block(pub Vec<Entry>);
 
 impl Deref for Block {
@@ -62,22 +71,26 @@ impl Block {
 		// Duplicate context
 		let mut ctx = Context::new(ctx);
 		// Loop over the statements
-		for v in self.iter() {
+		for (i, v) in self.iter().enumerate() {
 			match v {
 				Entry::Set(v) => {
-					// Check if the variable is a protected variable
-					let val = match PROTECTED_PARAM_NAMES.contains(&v.name.as_str()) {
-						// The variable isn't protected and can be stored
-						false => v.compute(&ctx, opt, txn, doc).await,
-						// The user tried to set a protected variable
-						true => {
-							return Err(Error::InvalidParam {
-								name: v.name.to_owned(),
-							})
-						}
-					}?;
-					// Set the parameter
+					let val = v.compute(&ctx, opt, txn, doc).await?;
 					ctx.add_value(v.name.to_owned(), val);
+				}
+				Entry::Throw(v) => {
+					// Always errors immediately
+					v.compute(&ctx, opt, txn, doc).await?;
+				}
+				Entry::Break(v) => {
+					// Always errors immediately
+					v.compute(&ctx, opt, txn, doc).await?;
+				}
+				Entry::Continue(v) => {
+					// Always errors immediately
+					v.compute(&ctx, opt, txn, doc).await?;
+				}
+				Entry::Foreach(v) => {
+					v.compute(&ctx, opt, txn, doc).await?;
 				}
 				Entry::Ifelse(v) => {
 					v.compute(&ctx, opt, txn, doc).await?;
@@ -100,11 +113,24 @@ impl Block {
 				Entry::Insert(v) => {
 					v.compute(&ctx, opt, txn, doc).await?;
 				}
+				Entry::Define(v) => {
+					v.compute(&ctx, opt, txn, doc).await?;
+				}
+				Entry::Remove(v) => {
+					v.compute(&ctx, opt, txn, doc).await?;
+				}
 				Entry::Output(v) => {
+					// Return the RETURN value
 					return v.compute(&ctx, opt, txn, doc).await;
 				}
 				Entry::Value(v) => {
-					return v.compute(&ctx, opt, txn, doc).await;
+					if i == self.len() - 1 {
+						// If the last entry then return the value
+						return v.compute(&ctx, opt, txn, doc).await;
+					} else {
+						// Otherwise just process the value
+						v.compute(&ctx, opt, txn, doc).await?;
+					}
 				}
 			}
 		}
@@ -159,14 +185,19 @@ impl Display for Block {
 }
 
 pub fn block(i: &str) -> IResult<&str, Block> {
-	let (i, _) = openbraces(i)?;
-	let (i, v) = separated_list0(colons, entry)(i)?;
-	let (i, _) = many0(alt((colons, comment)))(i)?;
-	let (i, _) = closebraces(i)?;
-	Ok((i, Block(v)))
+	expect_delimited(
+		openbraces,
+		|i| {
+			let (i, v) = separated_list0(colons, entry)(i)?;
+			let (i, _) = many0(colons)(i)?;
+			Ok((i, Block(v)))
+		},
+		closebraces,
+	)(i)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub enum Entry {
 	Value(Value),
 	Set(SetStatement),
@@ -178,6 +209,12 @@ pub enum Entry {
 	Relate(RelateStatement),
 	Insert(InsertStatement),
 	Output(OutputStatement),
+	Define(DefineStatement),
+	Remove(RemoveStatement),
+	Throw(ThrowStatement),
+	Break(BreakStatement),
+	Continue(ContinueStatement),
+	Foreach(ForeachStatement),
 }
 
 impl PartialOrd for Entry {
@@ -201,6 +238,12 @@ impl Entry {
 			Self::Relate(v) => v.writeable(),
 			Self::Insert(v) => v.writeable(),
 			Self::Output(v) => v.writeable(),
+			Self::Define(v) => v.writeable(),
+			Self::Remove(v) => v.writeable(),
+			Self::Throw(v) => v.writeable(),
+			Self::Break(v) => v.writeable(),
+			Self::Continue(v) => v.writeable(),
+			Self::Foreach(v) => v.writeable(),
 		}
 	}
 }
@@ -218,6 +261,12 @@ impl Display for Entry {
 			Self::Relate(v) => write!(f, "{v}"),
 			Self::Insert(v) => write!(f, "{v}"),
 			Self::Output(v) => write!(f, "{v}"),
+			Self::Define(v) => write!(f, "{v}"),
+			Self::Remove(v) => write!(f, "{v}"),
+			Self::Throw(v) => write!(f, "{v}"),
+			Self::Break(v) => write!(f, "{v}"),
+			Self::Continue(v) => write!(f, "{v}"),
+			Self::Foreach(v) => write!(f, "{v}"),
 		}
 	}
 }
@@ -235,6 +284,12 @@ pub fn entry(i: &str) -> IResult<&str, Entry> {
 			map(relate, Entry::Relate),
 			map(delete, Entry::Delete),
 			map(insert, Entry::Insert),
+			map(define, Entry::Define),
+			map(remove, Entry::Remove),
+			map(throw, Entry::Throw),
+			map(r#break, Entry::Break),
+			map(r#continue, Entry::Continue),
+			map(foreach, Entry::Foreach),
 			map(value, Entry::Value),
 		)),
 		mightbespace,

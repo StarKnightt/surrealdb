@@ -91,6 +91,12 @@ impl FromArg for usize {
 	}
 }
 
+impl FromArg for Vec<String> {
+	fn from_arg(arg: Value) -> Result<Self, Error> {
+		arg.coerce_to_array_type(&Kind::String)?.into_iter().map(Value::try_into).collect()
+	}
+}
+
 impl FromArg for Vec<Number> {
 	fn from_arg(arg: Value) -> Result<Self, Error> {
 		arg.coerce_to_array_type(&Kind::Number)?.into_iter().map(Value::try_into).collect()
@@ -114,6 +120,20 @@ pub trait FromArgs: Sized {
 impl FromArgs for Vec<Value> {
 	fn from_args(_name: &str, args: Vec<Value>) -> Result<Self, Error> {
 		Ok(args)
+	}
+}
+
+impl FromArgs for Vec<Array> {
+	fn from_args(name: &str, args: Vec<Value>) -> Result<Self, Error> {
+		args.into_iter()
+			.enumerate()
+			.map(|(i, arg)| {
+				arg.coerce_to_array_type(&Kind::Any).map_err(|e| Error::InvalidArguments {
+					name: name.to_owned(),
+					message: format!("Argument {} was the wrong type. {e}", i + 1),
+				})
+			})
+			.collect()
 	}
 }
 

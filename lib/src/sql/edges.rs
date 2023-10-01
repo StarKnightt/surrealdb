@@ -5,7 +5,8 @@ use crate::sql::table::{table, tables, Tables};
 use crate::sql::thing::{thing, Thing};
 use nom::branch::alt;
 use nom::character::complete::char;
-use nom::combinator::map;
+use nom::combinator::{cut, into, map};
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -13,6 +14,7 @@ pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Edges";
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Edges")]
+#[revisioned(revision = 1)]
 pub struct Edges {
 	pub dir: Dir,
 	pub from: Thing,
@@ -50,13 +52,12 @@ fn simple(i: &str) -> IResult<&str, Tables> {
 fn custom(i: &str) -> IResult<&str, Tables> {
 	let (i, _) = openparentheses(i)?;
 	let (i, w) = alt((any, tables))(i)?;
-	let (i, _) = closeparentheses(i)?;
+	let (i, _) = cut(closeparentheses)(i)?;
 	Ok((i, w))
 }
 
 fn one(i: &str) -> IResult<&str, Tables> {
-	let (i, v) = table(i)?;
-	Ok((i, Tables::from(v)))
+	into(table)(i)
 }
 
 fn any(i: &str) -> IResult<&str, Tables> {
@@ -72,7 +73,6 @@ mod tests {
 	fn edges_in() {
 		let sql = "person:test<-likes";
 		let res = edges(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("person:test<-likes", format!("{}", out));
 	}
@@ -81,7 +81,6 @@ mod tests {
 	fn edges_out() {
 		let sql = "person:test->likes";
 		let res = edges(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("person:test->likes", format!("{}", out));
 	}
@@ -90,7 +89,6 @@ mod tests {
 	fn edges_both() {
 		let sql = "person:test<->likes";
 		let res = edges(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("person:test<->likes", format!("{}", out));
 	}
@@ -99,7 +97,6 @@ mod tests {
 	fn edges_multiple() {
 		let sql = "person:test->(likes, follows)";
 		let res = edges(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("person:test->(likes, follows)", format!("{}", out));
 	}

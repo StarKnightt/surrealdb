@@ -7,21 +7,28 @@ use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
 use crate::sql::data::{single, update, values, Data};
+use crate::sql::error::expected;
+use crate::sql::error::ExplainResultExt;
 use crate::sql::error::IResult;
 use crate::sql::output::{output, Output};
 use crate::sql::param::param;
 use crate::sql::table::table;
 use crate::sql::timeout::{timeout, Timeout};
+use crate::sql::value::value;
 use crate::sql::value::Value;
 use derive::Store;
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
+use nom::combinator::cut;
 use nom::combinator::{map, opt};
 use nom::sequence::preceded;
+use nom::sequence::terminated;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Store, Hash)]
+#[revisioned(revision = 1)]
 pub struct InsertStatement {
 	pub into: Value,
 	pub data: Data,
@@ -37,14 +44,6 @@ impl InsertStatement {
 	pub(crate) fn writeable(&self) -> bool {
 		true
 	}
-	/// Check if this statement is for a single record
-	pub(crate) fn single(&self) -> bool {
-		match &self.data {
-			Data::SingleExpression(v) if v.is_object() => true,
-			Data::ValuesExpression(v) if v.len() == 1 => true,
-			_ => false,
-		}
-	}
 	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(
 		&self,
@@ -58,7 +57,7 @@ impl InsertStatement {
 		// Create a new iterator
 		let mut i = Iterator::new();
 		// Ensure futures are stored
-		let opt = &opt.new_with_futures(false);
+		let opt = &opt.new_with_futures(false).with_projections(false);
 		// Parse the expression
 		match self.into.compute(ctx, opt, txn, doc).await? {
 			Value::Table(into) => match &self.data {
@@ -106,7 +105,7 @@ impl InsertStatement {
 				_ => unreachable!(),
 			},
 			v => {
-				return Err(Error::RelateStatement {
+				return Err(Error::InsertStatement {
 					value: v.to_string(),
 				})
 			}
@@ -125,6 +124,9 @@ impl fmt::Display for InsertStatement {
 			f.write_str(" IGNORE")?
 		}
 		write!(f, " INTO {} {}", self.into, self.data)?;
+		if let Some(ref v) = self.update {
+			write!(f, " {v}")?
+		}
 		if let Some(ref v) = self.output {
 			write!(f, " {v}")?
 		}
@@ -140,13 +142,19 @@ impl fmt::Display for InsertStatement {
 
 pub fn insert(i: &str) -> IResult<&str, InsertStatement> {
 	let (i, _) = tag_no_case("INSERT")(i)?;
-	let (i, ignore) = opt(preceded(shouldbespace, tag_no_case("IGNORE")))(i)?;
 	let (i, _) = shouldbespace(i)?;
+	let (i, ignore) = opt(terminated(tag_no_case("IGNORE"), shouldbespace))(i)?;
 	let (i, _) = tag_no_case("INTO")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, into) = alt((map(table, Value::Table), map(param, Value::Param)))(i)?;
-	let (i, _) = shouldbespace(i)?;
-	let (i, data) = alt((values, single))(i)?;
+	let (i, into) = expected(
+		"a parameter or a table name",
+		cut(alt((
+			map(terminated(table, shouldbespace), Value::Table),
+			map(terminated(param, shouldbespace), Value::Param),
+		))),
+	)(i)
+	.explain("expressions aren't allowed here.", value)?;
+	let (i, data) = cut(alt((values, single)))(i)?;
 	let (i, update) = opt(preceded(shouldbespace, update))(i)?;
 	let (i, output) = opt(preceded(shouldbespace, output))(i)?;
 	let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
@@ -174,7 +182,6 @@ mod tests {
 	fn insert_statement_basic() {
 		let sql = "INSERT INTO test (field) VALUES ($value)";
 		let res = insert(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("INSERT INTO test (field) VALUES ($value)", format!("{}", out))
 	}
@@ -183,8 +190,15 @@ mod tests {
 	fn insert_statement_ignore() {
 		let sql = "INSERT IGNORE INTO test (field) VALUES ($value)";
 		let res = insert(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("INSERT IGNORE INTO test (field) VALUES ($value)", format!("{}", out))
+	}
+
+	#[test]
+	fn insert_statement_ignore_update() {
+		let sql = "INSERT IGNORE INTO test (field) VALUES ($value) ON DUPLICATE KEY UPDATE field = $value";
+		let res = insert(sql);
+		let out = res.unwrap().1;
+		assert_eq!("INSERT IGNORE INTO test (field) VALUES ($value) ON DUPLICATE KEY UPDATE field = $value", format!("{}", out))
 	}
 }

@@ -12,10 +12,13 @@ use nom::combinator::recognize;
 use nom::combinator::value;
 use nom::multi::separated_list1;
 use nom::sequence::delimited;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::str;
+
+use super::error::expected;
 
 const BRACKET_L: char = '⟨';
 const BRACKET_R: char = '⟩';
@@ -25,6 +28,7 @@ const BACKTICK: char = '`';
 const BACKTICK_ESC_NUL: &str = "`\\\0";
 
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Ident(#[serde(with = "no_nul_bytes")] pub String);
 
 impl From<String> for Ident {
@@ -76,7 +80,7 @@ impl Display for Ident {
 }
 
 pub fn ident(i: &str) -> IResult<&str, Ident> {
-	let (i, v) = ident_raw(i)?;
+	let (i, v) = expected("an identifier", ident_raw)(i)?;
 	Ok((i, Ident::from(v)))
 }
 
@@ -134,7 +138,6 @@ mod tests {
 	fn ident_normal() {
 		let sql = "test";
 		let res = ident(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("test", format!("{}", out));
 		assert_eq!(out, Ident::from("test"));
@@ -144,7 +147,6 @@ mod tests {
 	fn ident_quoted_backtick() {
 		let sql = "`test`";
 		let res = ident(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("test", format!("{}", out));
 		assert_eq!(out, Ident::from("test"));
@@ -154,7 +156,6 @@ mod tests {
 	fn ident_quoted_brackets() {
 		let sql = "⟨test⟩";
 		let res = ident(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("test", format!("{}", out));
 		assert_eq!(out, Ident::from("test"));

@@ -9,7 +9,9 @@ use crate::sql::kind::{kind, Kind};
 use crate::sql::value::{single, Value};
 use async_recursion::async_recursion;
 use nom::character::complete::char;
+use nom::combinator::cut;
 use nom::sequence::delimited;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
@@ -18,6 +20,7 @@ pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Cast";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Cast")]
+#[revisioned(revision = 1)]
 pub struct Cast(pub Kind, pub Value);
 
 impl PartialOrd for Cast {
@@ -44,8 +47,6 @@ impl Cast {
 		txn: &Transaction,
 		doc: Option<&'async_recursion CursorDoc<'_>>,
 	) -> Result<Value, Error> {
-		// Prevent long cast chains
-		let opt = &opt.dive(1)?;
 		// Compute the value to be cast and convert it
 		self.1.compute(ctx, opt, txn, doc).await?.convert_to(&self.0)
 	}
@@ -58,9 +59,9 @@ impl fmt::Display for Cast {
 }
 
 pub fn cast(i: &str) -> IResult<&str, Cast> {
-	let (i, k) = delimited(char('<'), kind, char('>'))(i)?;
+	let (i, k) = delimited(char('<'), cut(kind), char('>'))(i)?;
 	let (i, _) = mightbespace(i)?;
-	let (i, v) = single(i)?;
+	let (i, v) = cut(single)(i)?;
 	Ok((i, Cast(k, v)))
 }
 
@@ -73,7 +74,6 @@ mod tests {
 	fn cast_int() {
 		let sql = "<int>1.2345";
 		let res = cast(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("<int> 1.2345f", format!("{}", out));
 		assert_eq!(out, Cast(Kind::Int, 1.2345.into()));
@@ -83,7 +83,6 @@ mod tests {
 	fn cast_string() {
 		let sql = "<string>1.2345";
 		let res = cast(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("<string> 1.2345f", format!("{}", out));
 		assert_eq!(out, Cast(Kind::String, 1.2345.into()));

@@ -9,17 +9,18 @@ use crate::api::engine::any::Any;
 use crate::api::err::Error;
 use crate::api::opt::Endpoint;
 use crate::api::DbResponse;
+use crate::api::OnceLockExt;
 use crate::api::Result;
 use crate::api::Surreal;
 use crate::error::Db as DbError;
 use flume::Receiver;
-use once_cell::sync::OnceCell;
 use std::collections::HashSet;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 impl crate::api::Connection for Any {}
 
@@ -45,7 +46,7 @@ impl Connection for Any {
 			let (conn_tx, conn_rx) = flume::bounded::<Result<()>>(1);
 			let mut features = HashSet::new();
 
-			match address.endpoint.scheme() {
+			match address.url.scheme() {
 				"fdb" => {
 					#[cfg(feature = "kv-fdb")]
 					{
@@ -143,7 +144,7 @@ impl Connection for Any {
 					#[cfg(feature = "protocol-ws")]
 					{
 						let mut address = address;
-						address.endpoint = address.endpoint.join(engine::remote::ws::PATH)?;
+						address.url = address.url.join(engine::remote::ws::PATH)?;
 						engine::remote::ws::wasm::router(address, capacity, conn_tx, route_rx);
 						conn_rx.into_recv_async().await??;
 					}
@@ -161,7 +162,7 @@ impl Connection for Any {
 			}
 
 			Ok(Surreal {
-				router: OnceCell::with_value(Arc::new(Router {
+				router: Arc::new(OnceLock::with_value(Router {
 					features,
 					conn: PhantomData,
 					sender: route_tx,

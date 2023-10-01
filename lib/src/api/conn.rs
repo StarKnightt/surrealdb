@@ -61,7 +61,7 @@ where
 pub enum Method {
 	/// Sends an authentication token to the server
 	Authenticate,
-	/// Perfoms a merge update operation
+	/// Performs a merge update operation
 	Merge,
 	/// Creates a record in a table
 	Create,
@@ -81,7 +81,7 @@ pub enum Method {
 	/// Starts a live query
 	#[doc(hidden)] // Not supported yet
 	Live,
-	/// Perfoms a patch update operation
+	/// Performs a patch update operation
 	Patch,
 	/// Sends a raw query to the database
 	Query,
@@ -95,7 +95,7 @@ pub enum Method {
 	Signup,
 	/// Removes a parameter from a connection
 	Unset,
-	/// Perfoms an update operation
+	/// Performs an update operation
 	Update,
 	/// Selects a namespace and database to use
 	Use,
@@ -119,14 +119,16 @@ pub struct Param {
 	pub(crate) query: Option<(Query, BTreeMap<String, Value>)>,
 	pub(crate) other: Vec<Value>,
 	pub(crate) file: Option<PathBuf>,
+	pub(crate) sender: Option<channel::Sender<Result<Vec<u8>>>>,
 }
 
 impl Param {
 	pub(crate) fn new(other: Vec<Value>) -> Self {
 		Self {
-			other,
 			query: None,
+			other,
 			file: None,
+			sender: None,
 		}
 	}
 
@@ -135,6 +137,7 @@ impl Param {
 			query: Some((query, bindings)),
 			other: Vec::new(),
 			file: None,
+			sender: None,
 		}
 	}
 
@@ -143,6 +146,16 @@ impl Param {
 			query: None,
 			other: Vec::new(),
 			file: Some(file),
+			sender: None,
+		}
+	}
+
+	pub(crate) fn sender(send: channel::Sender<Result<Vec<u8>>>) -> Self {
+		Self {
+			query: None,
+			other: Vec::new(),
+			file: None,
+			sender: Some(send),
 		}
 	}
 }

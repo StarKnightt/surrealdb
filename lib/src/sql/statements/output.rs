@@ -10,10 +10,12 @@ use derive::Store;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::opt;
 use nom::sequence::preceded;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Store, Hash)]
+#[revisioned(revision = 1)]
 pub struct OutputStatement {
 	pub what: Value,
 	pub fetch: Option<Fetchs>,
@@ -80,7 +82,6 @@ mod tests {
 	fn output_statement() {
 		let sql = "RETURN $param";
 		let res = output(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("RETURN $param", format!("{}", out));
 	}

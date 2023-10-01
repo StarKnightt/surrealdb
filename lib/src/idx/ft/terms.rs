@@ -2,13 +2,13 @@ use crate::err::Error;
 use crate::idx::trees::bkeys::FstKeys;
 use crate::idx::trees::btree::{BState, BStatistics, BTree, BTreeNodeStore};
 use crate::idx::trees::store::{TreeNodeProvider, TreeNodeStore, TreeStoreType};
-use crate::idx::{IndexKeyBase, SerdeState};
+use crate::idx::{IndexKeyBase, VersionedSerdeState};
 use crate::kvs::{Key, Transaction};
+use revision::revisioned;
 use roaring::RoaringTreemap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
 pub(crate) type TermId = u64;
 
 pub(super) struct Terms {
@@ -135,13 +135,14 @@ impl Terms {
 }
 
 #[derive(Serialize, Deserialize)]
+#[revisioned(revision = 1)]
 struct State {
 	btree: BState,
 	available_ids: Option<RoaringTreemap>,
 	next_term_id: TermId,
 }
 
-impl SerdeState for State {}
+impl VersionedSerdeState for State {}
 
 impl State {
 	fn new(default_btree_order: u32) -> Self {
@@ -159,7 +160,7 @@ mod tests {
 	use crate::idx::ft::terms::Terms;
 	use crate::idx::trees::store::TreeStoreType;
 	use crate::idx::IndexKeyBase;
-	use crate::kvs::Datastore;
+	use crate::kvs::{Datastore, LockType::*, TransactionType::*};
 	use rand::{thread_rng, Rng};
 	use std::collections::HashSet;
 
@@ -188,7 +189,7 @@ mod tests {
 		let ds = Datastore::new("memory").await.unwrap();
 
 		{
-			let mut tx = ds.transaction(true, false).await.unwrap();
+			let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 			let mut t =
 				Terms::new(&mut tx, idx.clone(), BTREE_ORDER, TreeStoreType::Write).await.unwrap();
 			t.finish(&mut tx).await.unwrap();
@@ -197,7 +198,7 @@ mod tests {
 
 		// Resolve a first term
 		{
-			let mut tx = ds.transaction(true, false).await.unwrap();
+			let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 			let mut t =
 				Terms::new(&mut tx, idx.clone(), BTREE_ORDER, TreeStoreType::Write).await.unwrap();
 			assert_eq!(t.resolve_term_id(&mut tx, "C").await.unwrap(), 0);
@@ -208,7 +209,7 @@ mod tests {
 
 		// Resolve a second term
 		{
-			let mut tx = ds.transaction(true, false).await.unwrap();
+			let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 			let mut t =
 				Terms::new(&mut tx, idx.clone(), BTREE_ORDER, TreeStoreType::Write).await.unwrap();
 			assert_eq!(t.resolve_term_id(&mut tx, "D").await.unwrap(), 1);
@@ -219,7 +220,7 @@ mod tests {
 
 		// Resolve two existing terms with new frequencies
 		{
-			let mut tx = ds.transaction(true, false).await.unwrap();
+			let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 			let mut t =
 				Terms::new(&mut tx, idx.clone(), BTREE_ORDER, TreeStoreType::Write).await.unwrap();
 			assert_eq!(t.resolve_term_id(&mut tx, "C").await.unwrap(), 0);
@@ -232,7 +233,7 @@ mod tests {
 
 		// Resolve one existing terms and two new terms
 		{
-			let mut tx = ds.transaction(true, false).await.unwrap();
+			let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 			let mut t =
 				Terms::new(&mut tx, idx.clone(), BTREE_ORDER, TreeStoreType::Write).await.unwrap();
 
@@ -254,7 +255,7 @@ mod tests {
 
 		let ds = Datastore::new("memory").await.unwrap();
 
-		let mut tx = ds.transaction(true, false).await.unwrap();
+		let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 		let mut t =
 			Terms::new(&mut tx, idx.clone(), BTREE_ORDER, TreeStoreType::Write).await.unwrap();
 
@@ -298,7 +299,7 @@ mod tests {
 	async fn test_resolve_100_docs_with_50_words_one_by_one() {
 		let ds = Datastore::new("memory").await.unwrap();
 		for _ in 0..100 {
-			let mut tx = ds.transaction(true, false).await.unwrap();
+			let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 			let mut t = Terms::new(&mut tx, IndexKeyBase::default(), 100, TreeStoreType::Write)
 				.await
 				.unwrap();
@@ -315,7 +316,7 @@ mod tests {
 	async fn test_resolve_100_docs_with_50_words_batch_of_10() {
 		let ds = Datastore::new("memory").await.unwrap();
 		for _ in 0..10 {
-			let mut tx = ds.transaction(true, false).await.unwrap();
+			let mut tx = ds.transaction(Write, Optimistic).await.unwrap();
 			let mut t = Terms::new(&mut tx, IndexKeyBase::default(), 100, TreeStoreType::Write)
 				.await
 				.unwrap();

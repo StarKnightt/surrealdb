@@ -10,6 +10,7 @@ use crate::sql::idiom::Idiom;
 use crate::sql::number::Number;
 use crate::sql::operator::Operator;
 use crate::sql::part::Part;
+use crate::sql::paths::ID;
 use crate::sql::statement::Statement as Query;
 use crate::sql::statements::delete::DeleteStatement;
 use crate::sql::statements::ifelse::IfelseStatement;
@@ -175,7 +176,6 @@ impl<'a> Document<'a> {
 						tb: ft.name.to_raw(),
 						id: rid.id.clone(),
 					};
-					// Use the current record data
 					// Check if a WHERE clause is specified
 					match &tb.cond {
 						// There is a WHERE clause specified
@@ -192,17 +192,7 @@ impl<'a> Document<'a> {
 										// Update the value in the table
 										_ => Query::Update(UpdateStatement {
 											what: Values(vec![Value::from(rid)]),
-											data: Some(Data::ReplaceExpression(
-												tb.expr
-													.compute(
-														ctx,
-														opt,
-														txn,
-														Some(&self.current),
-														false,
-													)
-													.await?,
-											)),
+											data: Some(self.full(ctx, opt, txn, &tb.expr).await?),
 											..UpdateStatement::default()
 										}),
 									};
@@ -232,11 +222,7 @@ impl<'a> Document<'a> {
 								// Update the value in the table
 								_ => Query::Update(UpdateStatement {
 									what: Values(vec![Value::from(rid)]),
-									data: Some(Data::ReplaceExpression(
-										tb.expr
-											.compute(ctx, opt, txn, Some(&self.current), false)
-											.await?,
-									)),
+									data: Some(self.full(ctx, opt, txn, &tb.expr).await?),
 									..UpdateStatement::default()
 								}),
 							};
@@ -249,6 +235,18 @@ impl<'a> Document<'a> {
 		}
 		// Carry on
 		Ok(())
+	}
+	//
+	async fn full(
+		&self,
+		ctx: &Context<'_>,
+		opt: &Options,
+		txn: &Transaction,
+		exp: &Fields,
+	) -> Result<Data, Error> {
+		let mut data = exp.compute(ctx, opt, txn, Some(&self.current), false).await?;
+		data.cut(ID.as_ref());
+		Ok(Data::ReplaceExpression(data))
 	}
 	//
 	async fn data(
@@ -275,26 +273,32 @@ impl<'a> Document<'a> {
 				alias,
 			} = field
 			{
+				// Get the name of the field
 				let idiom = alias.clone().unwrap_or_else(|| expr.to_idiom());
+				// Ignore any id field
+				if idiom.is_id() {
+					continue;
+				}
+				// Process the field projection
 				match expr {
 					Value::Function(f) if f.is_rolling() => match f.name() {
-						"count" => {
+						Some("count") => {
 							let val = f.compute(ctx, opt, txn, doc).await?;
 							self.chg(&mut ops, &act, idiom, val);
 						}
-						"math::sum" => {
+						Some("math::sum") => {
 							let val = f.args()[0].compute(ctx, opt, txn, doc).await?;
 							self.chg(&mut ops, &act, idiom, val);
 						}
-						"math::min" | "time::min" => {
+						Some("math::min") | Some("time::min") => {
 							let val = f.args()[0].compute(ctx, opt, txn, doc).await?;
 							self.min(&mut ops, &act, idiom, val);
 						}
-						"math::max" | "time::max" => {
+						Some("math::max") | Some("time::max") => {
 							let val = f.args()[0].compute(ctx, opt, txn, doc).await?;
 							self.max(&mut ops, &act, idiom, val);
 						}
-						"math::mean" => {
+						Some("math::mean") => {
 							let val = f.args()[0].compute(ctx, opt, txn, doc).await?;
 							self.mean(&mut ops, &act, idiom, val);
 						}
